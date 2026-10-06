@@ -1,8 +1,7 @@
 # Creek Protocol
 
-> **Status: specification.** This defines the wire protocol Creek speaks. The M0 skeleton
-> implements the framing and a handful of commands over both transports; the rest is planned
-> (see `AGENTS.md` §17).
+> **Status: implemented through M1b.** The framing, connection/admin commands, and the key–value
+> commands over both transports exist; pub/sub and persistence are planned (see `AGENTS.md` §17).
 
 There is **one command model** and **one codec** (a RESP2 subset). It is carried by
 two transports:
@@ -236,6 +235,19 @@ Implementation: `src/creek/value.py`.
 | `SCAN cursor [MATCH p] [COUNT n]` | | `[nextCursor, [keys…]]` |
 | `INCR key [BY n]` / `DECR key [BY n]` | | integer |
 | `DBSIZE` | | integer |
+
+Notes:
+
+- `GET` returns a 2-element array `[type, value]`; `MGET` returns one such array per key, with
+  `null` for keys that are missing or expired.
+- `TYPE` returns a simple string: the type tag, or `none`.
+- Keys are scoped to the client's namespace (`AGENTS.md` §8); a client cannot address another
+  namespace.
+- `SET` clears any existing TTL; `INCR`/`DECR` preserve it. `EX`/`PX` must be positive.
+- `INCR`/`DECR` require an integer-typed value; a missing key starts as `i32` `0`. The result is
+  range-checked against the value's type and the command fails on overflow.
+- `SCAN` returns `[nextCursor, keys]`; the cursor is an index, `COUNT` defaults to `10`, `MATCH`
+  filters the output, and a next cursor of `"0"` means iteration is complete.
 
 ### Pub/Sub
 

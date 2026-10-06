@@ -150,8 +150,8 @@ creek/
 │   ├── auth.py         token -> Identity
 │   ├── errors.py       ProtocolError, CommandError
 │   ├── value.py        typed values (M1a)
-│   ├── store.py        (M1) keys + TTL
-│   ├── pattern.py      (M1) glob matching
+│   ├── store.py        keys + TTL (M1b)
+│   ├── pattern.py      glob matching (M1b)
 │   ├── pubsub.py       (M2) subscriptions
 │   └── persist.py      (M3) WAL + snapshots
 ├── tests/          test_protocol.py test_commands.py test_auth.py
@@ -359,6 +359,8 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 8. **Clustering** — explicitly out of scope for v1.
 9. **Streaming parser re-parse** — the TCP reader re-parses its buffer from the start after each
    read (simplest correct approach). Add a cursor if very large commands become a real workload.
+10. **SCAN cursor** — an index into the sorted key list, not a reverse-binary cursor like Redis;
+    iteration is not stable across concurrent writes. Fine for v1; revisit if it matters.
 
 ## 15. Coding conventions
 
@@ -397,6 +399,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
   registry. *(implemented)*
 - **M1a — Value model:** all primitive types, text parsing, binary codec, tests. *(implemented)*
 - **M1b — Store:** TTL, simple dict store, and the KV commands (`SET`/`GET`/`DEL`/`TTL`/…).
+  *(implemented)*
 - **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
 - **M3 — Persistence:** WAL + snapshot + recovery tests. (WAL compaction pending)
 - **M4 — Auth:** token file, per-client namespaces, coarse ACLs. (token hashing pending)
@@ -421,6 +424,12 @@ Notable decisions future work must respect (newest last).
   fixed by `creek.value.ValueType` and documented in `PROTOCOL.md` §5.1. Changing a value is a
   format break. `f8` is E4M3 and saturates; `f16`/`f32` overflow to ±inf. Text parsing is
   range-checked (`InvalidValue`), and `to_bytes`/`from_bytes` are the storage codec.
+- **2026-10-06 — Store ownership and TTL.** Keys are scoped by `(owner, key)` where `owner` is
+  the identity's namespace, never client-supplied. The store is a shared service injected into
+  each connection's `Context` by the server (no module-global state). TTLs are absolute wall-clock
+  deadlines (`time.time`) so M3 can persist them; expiry is lazy on access. `INCR`/`DECR` create a
+  missing key as `i32`, preserve the existing integer type and TTL, and range-check the result.
+  `SCAN` uses an integer index into the sorted key list (a simplification; see §14.10).
 
 ---
 

@@ -49,6 +49,11 @@ class ValueType(IntEnum):
         """The lower-case wire tag, e.g. ``"i32"``."""
         return self.name.lower()
 
+    @property
+    def is_integer_type(self) -> bool:
+        """Whether this type stores an integer."""
+        return self in _INT_RANGES
+
 
 _INT_RANGES: dict[ValueType, tuple[int, int]] = {
     ValueType.I4: (-8, 7),
@@ -129,6 +134,17 @@ class Value:
         except ValueError as exc:
             raise InvalidValue(f"unknown value type byte 0x{data[0]:02x}") from exc
         return cls(vtype, _decode_payload(vtype, data[1:]))
+
+    @classmethod
+    def from_int(cls, vtype: ValueType, number: int) -> Value:
+        """Build a range-checked integer value (used by INCR/DECR)."""
+        bounds = _INT_RANGES.get(vtype)
+        if bounds is None:
+            raise InvalidValue(f"{vtype.tag} is not an integer type")
+        low, high = bounds
+        if not low <= number <= high:
+            raise InvalidValue(f"{vtype.tag} out of range: {number}")
+        return cls(vtype, number)
 
 
 def _parse_data(vtype: ValueType, raw: str) -> int | float | str | bool:

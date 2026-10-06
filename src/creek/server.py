@@ -24,6 +24,7 @@ from creek.auth import ANONYMOUS, Authenticator
 from creek.commands import Context, execute
 from creek.errors import CommandError, ProtocolError
 from creek.protocol import Command, Error, Incomplete, Reply, encode, parse
+from creek.store import Store
 
 log = logging.getLogger("creek.server")
 
@@ -61,6 +62,7 @@ class Server:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.authenticator = Authenticator.from_file(config.auth_file) if config.auth_file else None
+        self.store = Store()
         self._tcp: asyncio.Server | None = None
         self._ws: WsServer | None = None
         self._stop = asyncio.Event()
@@ -106,10 +108,12 @@ class Server:
             await self._ws.wait_closed()
 
     def _new_context(self, peer: str) -> Context:
+        anonymous = self.authenticator is None or self.authenticator.allow_anonymous
         return Context(
             peer=peer,
-            identity=None if self.authenticator is not None else ANONYMOUS,
+            identity=ANONYMOUS if anonymous else None,
             authenticator=self.authenticator,
+            store=self.store,
         )
 
     async def _run(self, command: Command, context: Context) -> Reply:
