@@ -177,23 +177,35 @@ only for storage and persistence.
 
 ### 5.1 Binary encoding (storage / WAL)
 
-`1 type byte || payload`, little-endian for fixed-width numerics:
+`1 type byte || payload`, little-endian for fixed-width numerics. The type byte
+is **stable** (it is part of the on-disk format):
 
-| Type | Payload |
-|---|---|
-| `i4`,`u4` | 1 byte, low nibble used |
-| `i8`,`u8`,`bool` | 1 byte (`bool`: `0`/`1`) |
-| `i16`,`u16`,`f16` | 2 bytes LE |
-| `i32`,`u32`,`f32` | 4 bytes LE |
-| `f64` | 8 bytes LE |
-| `str` | `uvarint` length + UTF-8 bytes |
+| Type | Byte | Payload |
+|---|---|---|
+| `i4` | `0x01` | 1 byte, low nibble used |
+| `u4` | `0x02` | 1 byte, low nibble used |
+| `i8` | `0x03` | 1 byte |
+| `u8` | `0x04` | 1 byte |
+| `i16` | `0x05` | 2 bytes LE |
+| `u16` | `0x06` | 2 bytes LE |
+| `i32` | `0x07` | 4 bytes LE |
+| `u32` | `0x08` | 4 bytes LE |
+| `f8` | `0x09` | 1 byte, E4M3 |
+| `f16` | `0x0A` | 2 bytes LE |
+| `f32` | `0x0B` | 4 bytes LE |
+| `f64` | `0x0C` | 8 bytes LE |
+| `str` | `0x0D` | `uvarint` length + UTF-8 bytes |
+| `bool` | `0x0E` | 1 byte, `0`/`1` |
 
 `f8` is OCP E4M3: 1 sign, 4 exponent (bias 7), 3 mantissa. Exponent field 15
 with mantissa 7 is NaN; overflow saturates to the largest finite value (448).
+`f16`/`f32` follow IEEE 754, so overflow rounds to ±infinity (they have an
+infinity; E4M3 does not).
 
 In the Python implementation, fixed-width payloads are packed with `struct`
 (little-endian prefix `<`); `f16` uses the `"e"` format. Python integers are
 unbounded, so integer types are range-checked on write and after arithmetic.
+Implementation: `src/creek/value.py`.
 
 ---
 

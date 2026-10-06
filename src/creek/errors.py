@@ -14,6 +14,10 @@ class ProtocolError(CreekError):
     """A malformed frame or command was received from a peer."""
 
 
+class InvalidValue(CreekError):
+    """A value could not be parsed, encoded, or is out of range."""
+
+
 class CommandError(CreekError):
     """A command failed; carries a RESP error code such as ``ERR``."""
 

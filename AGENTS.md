@@ -149,7 +149,7 @@ creek/
 │   ├── commands.py     registry, dispatch, built-in commands
 │   ├── auth.py         token -> Identity
 │   ├── errors.py       ProtocolError, CommandError
-│   ├── value.py        (M1) typed values
+│   ├── value.py        typed values (M1a)
 │   ├── store.py        (M1) keys + TTL
 │   ├── pattern.py      (M1) glob matching
 │   ├── pubsub.py       (M2) subscriptions
@@ -183,10 +183,11 @@ Encoding rules:
 
 - Wire/storage format is **little-endian** for fixed-width numerics (`struct` prefix `<`).
 - Canonical binary layout: `1 type byte || payload` (see `PROTOCOL.md` §5.1).
-  `Value.marshal_binary()` / `Value.unmarshal_binary()` implement it; persistence embeds the blob.
+  `Value.to_bytes()` / `Value.from_bytes()` implement it; persistence embeds the blob.
 - Python `int` is unbounded, so **every** integer type is range-checked on write and after
   arithmetic. `i4`/`u4` are logically 4-bit but stored as a masked byte in v1 (see §14).
-- `f16` uses `struct`'s `"e"`; `f8` (E4M3) is implemented in `creek/value/codec.py` (no dependency).
+- `f16` uses `struct`'s `"e"`; `f8` (E4M3) is implemented in `creek/value.py` (no dependency).
+  f16/f32 overflow rounds to ±inf; f8 saturates to ±448 (no infinity in E4M3).
 - Values are immutable once stored (`frozen=True` dataclass); mutations replace the value. Every
   entry carries an **owner** (namespace) so a shared store can scope keys per client.
 
@@ -394,7 +395,8 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 
 - **M0 — Skeleton:** package, `pyproject.toml`, flags, asyncio TCP + WS listeners, command
   registry. *(implemented)*
-- **M1 — Value + store:** all primitive types, TTL, simple dict store, tests.
+- **M1a — Value model:** all primitive types, text parsing, binary codec, tests. *(implemented)*
+- **M1b — Store:** TTL, simple dict store, and the KV commands (`SET`/`GET`/`DEL`/`TTL`/…).
 - **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
 - **M3 — Persistence:** WAL + snapshot + recovery tests. (WAL compaction pending)
 - **M4 — Auth:** token file, per-client namespaces, coarse ACLs. (token hashing pending)
@@ -415,6 +417,10 @@ Notable decisions future work must respect (newest last).
 - **2026-10-06 — uv and pip both supported.** uv is the agent-default (locks the interpreter,
   `uv.lock`), but the project is pip-installable: `pip install -e ".[dev]"`. Dev deps are declared
   in both the PEP 621 extra and the PEP 735 group, guarded by `tests/test_packaging.py`. See §3.
+- **2026-10-06 — Value type bytes.** Type tags are bytes `0x01`–`0x0E` (`i4`=1 … `bool`=14),
+  fixed by `creek.value.ValueType` and documented in `PROTOCOL.md` §5.1. Changing a value is a
+  format break. `f8` is E4M3 and saturates; `f16`/`f32` overflow to ±inf. Text parsing is
+  range-checked (`InvalidValue`), and `to_bytes`/`from_bytes` are the storage codec.
 
 ---
 
