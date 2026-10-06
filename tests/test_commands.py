@@ -7,7 +7,8 @@ import pytest
 from creek.auth import Authenticator, Identity
 from creek.commands import Context, execute
 from creek.errors import CommandError
-from creek.protocol import Command, SimpleString
+from creek.protocol import Command, SimpleString, encode_message
+from creek.pubsub import Bus, Subscriber
 from creek.store import Store
 
 # --- dispatch / auth -----------------------------------------------------
@@ -221,3 +222,87 @@ async def test_namespaces_are_isolated() -> None:
     await execute(Command("SET", ("k", "alice-value")), alice)
     assert await execute(Command("GET", ("k",)), bob) is None
     assert await execute(Command("GET", ("k",)), alice) == ["str", "alice-value"]
+
+
+# --- pub/sub -------------------------------------------------------------
+
+
+def _pair_of_contexts() -> tuple[Context, Context]:
+    bus = Bus()
+    return (
+        Context(bus=bus, subscriber=Subscriber("default")),
+        Context(bus=bus, subscriber=Subscriber("default")),
+    )
+
+
+async def test_subscribe_confirmation() -> None:
+    subscriber, _ = _pair_of_contexts()
+    assert await execute(Command("SUBSCRIBE", ("a", "b")), subscriber) == [
+        ["subscribe", "a", 1],
+        ["subscribe", "b", 2],
+    ]
+
+
+async def test_publish_delivers() -> None:
+    subscriber, publisher = _pair_of_contexts()
+    await execute(Command("SUBSCRIBE", ("news",)), subscriber)
+    assert await execute(Command("PUBLISH", ("news", "hello")), publisher) == 1
+    assert await subscriber.subscriber.next_frame() == encode_message("news", "str", "hello")
+
+
+async def test_publish_typed_delivers() -> None:
+    subscriber, publisher = _pair_of_contexts()
+    await execute(Command("SUBSCRIBE", ("t",)), subscriber)
+    await execute(Command("PUBLISH", ("t", "21.5", "TYPE", "f32")), publisher)
+    assert await subscriber.subscriber.next_frame() == encode_message("t", "f32", "21.5")
+
+
+async def test_psubscribe_matches() -> None:
+    subscriber, publisher = _pair_of_contexts()
+    assert await execute(Command("PSUBSCRIBE", ("news.*",)), subscriber) == [
+        ["psubscribe", "news.*", 1]
+    ]
+    await execute(Command("PUBLISH", ("news.tech", "x")), publisher)
+    assert await subscriber.subscriber.next_frame() == encode_message("news.tech", "str", "x")
+
+
+async def test_unsubscribe() -> None:
+    subscriber, _ = _pair_of_contexts()
+    await execute(Command("SUBSCRIBE", ("a", "b")), subscriber)
+    assert await execute(Command("UNSUBSCRIBE", ("a",)), subscriber) == 1
+    assert await execute(Command("UNSUBSCRIBE", ()), subscriber) == 1
+    assert await execute(Command("UNSUBSCRIBE", ()), subscriber) == 0
+
+
+async def test_pubsub_introspection() -> None:
+    subscriber, publisher = _pair_of_contexts()
+    await execute(Command("SUBSCRIBE", ("a",)), subscriber)
+    await execute(Command("SUBSCRIBE", ("b",)), publisher)
+    assert await execute(Command("PUBSUB", ("CHANNELS",)), subscriber) == ["a", "b"]
+    assert await execute(Command("PUBSUB", ("CHANNELS", "a*")), subscriber) == ["a"]
+    assert await execute(Command("PUBSUB", ("NUMSUB", "a", "z")), subscriber) == ["a", 1, "z", 0]
+    assert await execute(Command("PUBSUB", ("NUMPAT",)), subscriber) == 0
+
+
+async def test_publish_retain_is_replayed() -> None:
+    publisher = Context(bus=Bus(), subscriber=Subscriber("default"))
+    await execute(Command("PUBLISH", ("news", "last", "RETAIN")), publisher)
+    subscriber = Context(bus=publisher.bus, subscriber=Subscriber("default"))
+    await execute(Command("SUBSCRIBE", ("news",)), subscriber)
+    assert subscriber.pending == [encode_message("news", "str", "last")]
+
+
+async def test_pubsub_namespaces_are_isolated() -> None:
+    bus = Bus()
+    subscriber = Context(
+        bus=bus,
+        subscriber=Subscriber("ns-a"),
+        identity=Identity("a", "ns-a", frozenset({"all"})),
+    )
+    publisher = Context(
+        bus=bus,
+        subscriber=Subscriber("ns-b"),
+        identity=Identity("b", "ns-b", frozenset({"all"})),
+    )
+    await execute(Command("SUBSCRIBE", ("news",)), subscriber)
+    assert await execute(Command("PUBLISH", ("news", "x")), publisher) == 0

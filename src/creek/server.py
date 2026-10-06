@@ -3,6 +3,9 @@
 Both transports carry the same RESP2 bytes and call the same
 :func:`creek.commands.execute`. TCP is a byte stream; WebSocket is one command
 per binary frame.
+
+Each connection has one outbound queue (:class:`creek.pubsub.Subscriber`) drained
+by a single writer task, so replies and pub/sub messages never interleave.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from creek.auth import ANONYMOUS, Authenticator
 from creek.commands import Context, execute
 from creek.errors import CommandError, ProtocolError
 from creek.protocol import Command, Error, Incomplete, Reply, encode, parse
+from creek.pubsub import Bus, Subscriber
 from creek.store import Store
 
 log = logging.getLogger("creek.server")
@@ -63,6 +67,7 @@ class Server:
         self.config = config
         self.authenticator = Authenticator.from_file(config.auth_file) if config.auth_file else None
         self.store = Store()
+        self.bus = Bus()
         self._tcp: asyncio.Server | None = None
         self._ws: WsServer | None = None
         self._stop = asyncio.Event()
@@ -109,11 +114,15 @@ class Server:
 
     def _new_context(self, peer: str) -> Context:
         anonymous = self.authenticator is None or self.authenticator.allow_anonymous
+        identity = ANONYMOUS if anonymous else None
+        namespace = identity.namespace if identity is not None else "default"
         return Context(
             peer=peer,
-            identity=ANONYMOUS if anonymous else None,
+            identity=identity,
             authenticator=self.authenticator,
             store=self.store,
+            bus=self.bus,
+            subscriber=Subscriber(namespace),
         )
 
     async def _run(self, command: Command, context: Context) -> Reply:
@@ -122,9 +131,20 @@ class Server:
         except CommandError as exc:
             return Error(str(exc))
 
+    async def _dispatch(self, command: Command, context: Context) -> None:
+        """Run a command, then enqueue its reply and any deferred messages."""
+        reply = await self._run(command, context)
+        subscriber = context.subscriber
+        await subscriber.send(encode(reply))
+        for frame in context.pending:
+            subscriber.deliver(frame)
+        context.pending.clear()
+
     async def _handle_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = _peer_name(writer.get_extra_info("peername"))
         context = self._new_context(peer)
+        subscriber = context.subscriber
+        pump = asyncio.create_task(_pump_tcp(writer, subscriber))
         buffer = b""
         log.debug("tcp client connected", extra={"peer": peer})
         try:
@@ -139,19 +159,23 @@ class Server:
                     except Incomplete:
                         break
                     except ProtocolError as exc:
-                        writer.write(encode(Error(f"ERR {exc}")))
-                        await writer.drain()
+                        await subscriber.send(encode(Error(f"ERR {exc}")))
+                        await subscriber.join()
                         return
                     buffer = buffer[used:]
                     if command is None:
                         continue
-                    writer.write(encode(await self._run(command, context)))
-                    await writer.drain()
+                    await self._dispatch(command, context)
                     if context.close_after_reply:
+                        await subscriber.join()
                         return
         except (ConnectionError, OSError):
             pass
         finally:
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump
+            self.bus.remove(subscriber)
             writer.close()
             with contextlib.suppress(ConnectionError, OSError):
                 await writer.wait_closed()
@@ -160,6 +184,8 @@ class Server:
     async def _handle_ws(self, websocket: ServerConnection) -> None:
         peer = _peer_name(websocket.remote_address)
         context = self._new_context(peer)
+        subscriber = context.subscriber
+        pump = asyncio.create_task(_pump_ws(websocket, subscriber))
         log.debug("ws client connected", extra={"peer": peer})
         try:
             async for message in websocket:
@@ -169,15 +195,20 @@ class Server:
                     if command is None or used != len(frame):
                         raise ProtocolError("invalid frame")
                 except ProtocolError as exc:
-                    await websocket.send(encode(Error(f"ERR {exc}")))
+                    await subscriber.send(encode(Error(f"ERR {exc}")))
                     continue
-                await websocket.send(encode(await self._run(command, context)))
+                await self._dispatch(command, context)
                 if context.close_after_reply:
+                    await subscriber.join()
                     await websocket.close()
                     return
         except ConnectionClosed:
             pass
         finally:
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump
+            self.bus.remove(subscriber)
             log.debug("ws client disconnected", extra={"peer": peer})
 
     async def _serve_http(self, connection: ServerConnection, request: Request) -> Response | None:
@@ -194,6 +225,29 @@ class Server:
         body = await asyncio.to_thread(file.read_bytes)
         content_type = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
         return _response(200, body, content_type)
+
+
+async def _pump_tcp(writer: asyncio.StreamWriter, subscriber: Subscriber) -> None:
+    while True:
+        frame = await subscriber.next_frame()
+        try:
+            writer.write(frame)
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass  # keep draining so a pending join() can complete
+        finally:
+            subscriber.done()
+
+
+async def _pump_ws(websocket: ServerConnection, subscriber: Subscriber) -> None:
+    while True:
+        frame = await subscriber.next_frame()
+        try:
+            await websocket.send(frame)
+        except ConnectionClosed:
+            pass
+        finally:
+            subscriber.done()
 
 
 def _response(status: int, body: bytes, content_type: str) -> Response:

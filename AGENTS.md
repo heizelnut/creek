@@ -127,7 +127,7 @@ uv run creek \
 | Value model | `creek.value` | (M1) Primitive types, codecs, arithmetic |
 | Patterns | `creek.pattern` | (M1) Glob matching |
 | Store | `creek.store` | (M1) Single-dict in-memory KV, TTL, namespace ownership |
-| Pub/Sub | `creek.pubsub` | (M2) Subscription registry, pattern matching, fanout, retained |
+| Pub/Sub | `creek.pubsub` | Subscription registry, pattern matching, fanout, retained |
 | Auth | `creek.auth` | Client identification → identity + namespace |
 | Persistence | `creek.persist` | (M3) WAL, snapshots, recovery |
 | CLI | `creek.cli` | Flags, wiring, lifecycle, signals, snapshots |
@@ -152,7 +152,7 @@ creek/
 │   ├── value.py        typed values (M1a)
 │   ├── store.py        keys + TTL (M1b)
 │   ├── pattern.py      glob matching (M1b)
-│   ├── pubsub.py       (M2) subscriptions
+│   ├── pubsub.py       subscriptions + fanout (M2)
 │   └── persist.py      (M3) WAL + snapshots
 ├── tests/          test_protocol.py test_commands.py test_auth.py
 │                   test_cli.py test_server.py test_value.py ...
@@ -361,6 +361,11 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
    read (simplest correct approach). Add a cursor if very large commands become a real workload.
 10. **SCAN cursor** — an index into the sorted key list, not a reverse-binary cursor like Redis;
     iteration is not stable across concurrent writes. Fine for v1; revisit if it matters.
+11. **Pattern deliveries** — a delivered frame is always `[message, channel, vtype, value]`
+    (`PROTOCOL.md` §4.4); a pattern subscriber is not told *which* pattern matched. Add a
+    `pmessage` form if that's needed.
+12. **Pub/sub channel scoping** — channels are scoped by namespace (owner), like keys. Decide
+    whether cross-namespace channels are ever wanted.
 
 ## 15. Coding conventions
 
@@ -401,6 +406,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 - **M1b — Store:** TTL, simple dict store, and the KV commands (`SET`/`GET`/`DEL`/`TTL`/…).
   *(implemented)*
 - **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
+  *(implemented)*
 - **M3 — Persistence:** WAL + snapshot + recovery tests. (WAL compaction pending)
 - **M4 — Auth:** token file, per-client namespaces, coarse ACLs. (token hashing pending)
 - **M5 — Hardening:** browser load/perf pages; fuzz tests, Python client pending.
@@ -430,6 +436,13 @@ Notable decisions future work must respect (newest last).
   deadlines (`time.time`) so M3 can persist them; expiry is lazy on access. `INCR`/`DECR` create a
   missing key as `i32`, preserve the existing integer type and TTL, and range-check the result.
   `SCAN` uses an integer index into the sorted key list (a simplification; see §14.10).
+- **2026-10-06 — Pub/sub delivery.** Each connection owns one `Subscriber` with a single bounded
+  outbound queue; one writer task drains it, so replies and messages never interleave. Replies
+  use blocking `send` (backpressure); pub/sub uses `deliver` (drop the subscriber if full). The
+  `Bus` is shared via `Context` like the store. Fanout is a linear scan; a subscriber matching
+  both a channel and a pattern is delivered once. Channels are namespaced by owner (§14.12).
+  `RETAIN` stores the channel's last value and it is replayed *after* the subscribe confirmation
+  (handlers queue it in `Context.pending`, flushed by the transport after the reply).
 
 ---
 

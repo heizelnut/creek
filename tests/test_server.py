@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 import pytest
 import websockets
 
+from creek.protocol import encode_message
 from creek.server import Config, Server
 
 
@@ -133,3 +134,29 @@ async def test_tcp_typed_value_and_ttl(server: Server) -> None:
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+async def test_pubsub_across_websocket_connections(server: Server) -> None:
+    async with (
+        websockets.connect(f"ws://127.0.0.1:{server.ws_port}/ws") as subscriber,
+        websockets.connect(f"ws://127.0.0.1:{server.ws_port}/ws") as publisher,
+    ):
+        await subscriber.send(b"SUBSCRIBE news\r\n")
+        assert (await subscriber.recv()).startswith(b"*1")
+
+        await publisher.send(b"PUBLISH news hello\r\n")
+        assert await publisher.recv() == b":1\r\n"
+        assert await subscriber.recv() == encode_message("news", "str", "hello")
+
+
+async def test_retained_message_replayed_over_websocket(server: Server) -> None:
+    async with (
+        websockets.connect(f"ws://127.0.0.1:{server.ws_port}/ws") as publisher,
+        websockets.connect(f"ws://127.0.0.1:{server.ws_port}/ws") as subscriber,
+    ):
+        await publisher.send(b"PUBLISH news last RETAIN\r\n")
+        assert await publisher.recv() == b":0\r\n"
+
+        await subscriber.send(b"SUBSCRIBE news\r\n")
+        assert (await subscriber.recv()).startswith(b"*1")  # confirmation first
+        assert await subscriber.recv() == encode_message("news", "str", "last")

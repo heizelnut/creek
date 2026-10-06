@@ -1,7 +1,7 @@
 # Creek Protocol
 
-> **Status: implemented through M1b.** The framing, connection/admin commands, and the key–value
-> commands over both transports exist; pub/sub and persistence are planned (see `AGENTS.md` §17).
+> **Status: implemented through M2.** The framing, connection/admin, key–value, and pub/sub
+> commands exist over both transports; persistence is planned (see `AGENTS.md` §17).
 
 There is **one command model** and **one codec** (a RESP2 subset). It is carried by
 two transports:
@@ -262,8 +262,16 @@ Notes:
 | `PUBSUB NUMSUB [channel…]` | | `[channel, count, …]` |
 | `PUBSUB NUMPAT` | | integer |
 
-`RETAIN` stores the message as the channel's last value and persists it; new
-matching subscribers receive it immediately after subscribing.
+Notes:
+
+- Channels are scoped to the client's namespace, like keys.
+- A delivered frame is always `[message, channel, vtype, value]` (see §4.4); a pattern subscriber
+  is not told which pattern matched.
+- A subscriber that matches a channel *and* a pattern receives a single copy.
+- `count` is the connection's total subscriptions (channels + patterns) after the call.
+- `PUBSUB NUMSUB` counts direct channel subscribers only; `NUMPAT` counts distinct patterns.
+- `RETAIN` stores the message as the channel's last value; a new matching subscriber receives it
+  immediately after its subscribe confirmation.
 
 ### Admin
 

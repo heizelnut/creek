@@ -14,7 +14,8 @@ from creek import __version__
 from creek.auth import Authenticator, Identity
 from creek.errors import CommandError, InvalidValue
 from creek.pattern import match
-from creek.protocol import Command, Reply, SimpleString
+from creek.protocol import Command, Reply, SimpleString, encode_message
+from creek.pubsub import Bus, Subscriber
 from creek.store import Store
 from creek.value import Value, ValueType
 
@@ -31,6 +32,9 @@ class Context:
     identity: Identity | None = None
     authenticator: Authenticator | None = None
     store: Store = field(default_factory=Store)
+    bus: Bus = field(default_factory=Bus)
+    subscriber: Subscriber = field(default_factory=Subscriber)
+    pending: list[bytes] = field(default_factory=list)
     close_after_reply: bool = False
 
 
@@ -317,6 +321,92 @@ async def cmd_decr(command: Command, context: Context) -> Reply:
     return await _adjust(command, context, -1)
 
 
+# --- pub/sub -------------------------------------------------------------
+
+
+def _deliver_retained(context: Context, channel: str) -> None:
+    value = context.bus.retained(context.subscriber.owner, channel)
+    if value is not None:
+        frame = encode_message(channel, value.type.tag, value.text())
+        context.pending.append(frame)
+
+
+async def cmd_subscribe(command: Command, context: Context) -> Reply:
+    subscriber = context.subscriber
+    replies: list[Reply] = []
+    for channel in command.args:
+        context.bus.subscribe(subscriber, channel)
+        entry: list[Reply] = ["subscribe", channel, subscriber.count]
+        replies.append(entry)
+        _deliver_retained(context, channel)
+    return replies
+
+
+async def cmd_psubscribe(command: Command, context: Context) -> Reply:
+    subscriber = context.subscriber
+    replies: list[Reply] = []
+    for pattern in command.args:
+        context.bus.psubscribe(subscriber, pattern)
+        entry: list[Reply] = ["psubscribe", pattern, subscriber.count]
+        replies.append(entry)
+        for channel in context.bus.retained_channels(subscriber.owner, pattern):
+            _deliver_retained(context, channel)
+    return replies
+
+
+async def cmd_unsubscribe(command: Command, context: Context) -> Reply:
+    subscriber = context.subscriber
+    targets = list(command.args) if command.args else list(subscriber.channels)
+    return sum(1 for channel in targets if context.bus.unsubscribe(subscriber, channel))
+
+
+async def cmd_punsubscribe(command: Command, context: Context) -> Reply:
+    subscriber = context.subscriber
+    targets = list(command.args) if command.args else list(subscriber.patterns)
+    return sum(1 for pattern in targets if context.bus.punsubscribe(subscriber, pattern))
+
+
+async def cmd_publish(command: Command, context: Context) -> Reply:
+    channel = command.args[0]
+    tag = "str"
+    retain = False
+    options = command.args[2:]
+    index = 0
+    while index < len(options):
+        option = options[index].upper()
+        if option == "TYPE" and index + 1 < len(options):
+            tag = options[index + 1]
+            index += 2
+        elif option == "RETAIN":
+            retain = True
+            index += 1
+        else:
+            raise CommandError(f"syntax error near '{options[index]}'")
+    value = _parse_value(tag, command.args[1])
+    owner = _owner(context)
+    if retain:
+        context.bus.retain(owner, channel, value)
+    return context.bus.publish(owner, channel, value)
+
+
+async def cmd_pubsub(command: Command, context: Context) -> Reply:
+    subcommand = command.args[0].upper()
+    owner = _owner(context)
+    if subcommand == "CHANNELS":
+        pattern = command.args[1] if len(command.args) > 1 else "*"
+        channels: list[Reply] = list(context.bus.channels(owner, pattern))
+        return channels
+    if subcommand == "NUMSUB":
+        counts: list[Reply] = []
+        for channel in command.args[1:]:
+            counts.append(channel)
+            counts.append(context.bus.numsub(owner, channel))
+        return counts
+    if subcommand == "NUMPAT":
+        return context.bus.numpat(owner)
+    raise CommandError(f"unknown subcommand '{command.args[0]}'")
+
+
 register("PING", cmd_ping, max_args=1, scope="public")
 register("ECHO", cmd_echo, min_args=1, max_args=1, scope="public")
 register("QUIT", cmd_quit, scope="public")
@@ -337,3 +427,9 @@ register("SCAN", cmd_scan, min_args=1, max_args=None, scope="read")
 register("DBSIZE", cmd_dbsize, scope="read")
 register("INCR", cmd_incr, min_args=1, max_args=3, scope="write")
 register("DECR", cmd_decr, min_args=1, max_args=3, scope="write")
+register("PUBLISH", cmd_publish, min_args=2, max_args=None, scope="subscribe")
+register("SUBSCRIBE", cmd_subscribe, min_args=1, max_args=None, scope="subscribe")
+register("PSUBSCRIBE", cmd_psubscribe, min_args=1, max_args=None, scope="subscribe")
+register("UNSUBSCRIBE", cmd_unsubscribe, max_args=None, scope="subscribe")
+register("PUNSUBSCRIBE", cmd_punsubscribe, max_args=None, scope="subscribe")
+register("PUBSUB", cmd_pubsub, min_args=1, max_args=None, scope="read")
