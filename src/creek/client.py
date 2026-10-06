@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Protocol
 
@@ -33,6 +34,14 @@ CRLF = b"\r\n"
 
 class _NeedMore(Exception):
     """The buffer holds only part of a reply."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ServerError:
+    """A decoded ``-ERR`` reply, raised by :meth:`Client.execute`."""
+
+    code: str
+    message: str
 
 
 def encode_command(name: str, args: Iterable[Any] = ()) -> bytes:
@@ -57,7 +66,7 @@ def _parse_reply(data: bytes, pos: int = 0) -> tuple[Any, int]:
         return rest.decode("utf-8", "replace"), end + 2
     if kind == b"-":
         code, _, message = rest.decode("utf-8", "replace").partition(" ")
-        raise CommandError(message, code=code or "ERR")
+        return _ServerError(code or "ERR", message), end + 2
     if kind == b":":
         return int(rest), end + 2
     if kind == b"$":
@@ -165,9 +174,16 @@ class Client:
         await self._connection.close()
 
     async def execute(self, name: str, *args: Any) -> Any:
-        """Send a command and return the decoded reply."""
+        """Send a command and return the decoded reply.
+
+        Raises:
+            CommandError: if the server replies with an error.
+        """
         await self._connection.send(encode_command(name, args))
-        return await self._connection.receive()
+        reply = await self._connection.receive()
+        if isinstance(reply, _ServerError):
+            raise CommandError(reply.message, code=reply.code)
+        return reply
 
     # --- convenience wrappers ---
 

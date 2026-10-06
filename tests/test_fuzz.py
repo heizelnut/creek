@@ -14,10 +14,8 @@ from __future__ import annotations
 import math
 import random
 
-import pytest
-
-from creek.client import _NeedMore, _parse_reply
-from creek.errors import CommandError, InvalidValue, ProtocolError
+from creek.client import _NeedMore, _parse_reply, _ServerError
+from creek.errors import InvalidValue, ProtocolError
 from creek.persist import decode_records
 from creek.protocol import Command, Incomplete, parse
 from creek.value import Value, ValueType
@@ -110,7 +108,7 @@ def test_client_parse_reply_never_crashes() -> None:
         data = _random_bytes(rng, maximum=32)
         try:
             _value, used = _parse_reply(data)
-        except (_NeedMore, ProtocolError, CommandError):
+        except (_NeedMore, ProtocolError):
             continue
         assert 0 < used <= len(data)
 
@@ -121,5 +119,4 @@ def test_client_parse_reply_roundtrips_a_frame() -> None:
     # encode a command, then parse a reply frame of the same shape
     assert encode_command("SET", ["k", "v"]) == b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
     assert _parse_reply(b"*2\r\n$3\r\nstr\r\n$1\r\nv\r\n") == (["str", "v"], 20)
-    with pytest.raises(CommandError):
-        _parse_reply(b"-ERR nope\r\n")
+    assert _parse_reply(b"-ERR nope\r\n") == (_ServerError("ERR", "nope"), 11)

@@ -52,6 +52,14 @@ async def test_client_error(server: Server) -> None:
         assert info.value.code == "ERR"
 
 
+async def test_tcp_error_is_consumed(server: Server) -> None:
+    # Regression: a TCP error reply must be consumed, not re-raised forever.
+    async with await connect(f"tcp://127.0.0.1:{server.tcp_port}") as client:
+        with pytest.raises(CommandError):
+            await client.execute("NOPE")
+        assert await client.ping() == "PONG"
+
+
 async def test_client_pubsub(server: Server) -> None:
     async with (
         await connect(f"ws://127.0.0.1:{server.ws_port}/ws") as subscriber,
