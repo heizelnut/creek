@@ -47,6 +47,31 @@ async def main():
 asyncio.run(main())
 ```
 
+## Client library
+
+`creek.client` is an async client that speaks both transports and decodes replies to native
+Python values (a server error raises `CommandError`).
+
+```python
+import asyncio
+from creek.client import connect
+
+
+async def main():
+    async with await connect("ws://localhost:7100/ws") as client:  # or tcp://host:port
+        await client.set("temp", "21.5", type="f32", ex=60)
+        print(await client.get("temp"))  # ['f32', '21.5']
+        await client.publish("news", "hello")
+
+
+asyncio.run(main())
+```
+
+## Browser pages
+
+With `--web-dir ./web`, the WebSocket listener also serves dependency-free load and performance
+pages at `/` (`index.html`, `loadtest.html`, `perf.html`, `bench.js`).
+
 ## Development
 
 Both environments run the same checks.

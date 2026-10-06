@@ -131,6 +131,7 @@ uv run creek \
 | Auth | `creek.auth` | Client identification → identity + namespace |
 | Persistence | `creek.persist` | (M3) WAL, snapshots, recovery |
 | CLI | `creek.cli` | Flags, wiring, lifecycle, signals, snapshots |
+| Client library | `creek.client` | Async client over WebSocket/TCP |
 | Browser tests | `web/` | Load and performance pages (`bench.js`) |
 
 ## 5. Repository layout (target)
@@ -153,9 +154,12 @@ creek/
 │   ├── store.py        keys + TTL (M1b)
 │   ├── pattern.py      glob matching (M1b)
 │   ├── pubsub.py       subscriptions + fanout (M2)
-│   └── persist.py      WAL + snapshots (M3)
+│   ├── persist.py      WAL + snapshots (M3)
+│   └── client.py       async client library (M5)
 ├── tests/          test_protocol.py test_commands.py test_auth.py
-│                   test_cli.py test_server.py test_value.py ...
+│                   test_cli.py test_server.py test_value.py
+│                   test_store.py test_pubsub.py test_persist.py
+│                   test_client.py test_fuzz.py test_packaging.py ...
 ├── scripts/        bench.py (load/benchmark harness), hash_token.py
 └── web/            index.html loadtest.html perf.html bench.js
 ```
@@ -337,6 +341,8 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 
 - Table-driven (parametrized) unit tests for `value`, `pattern`, `protocol`, `store`, and `pubsub`.
 - Codec golden/round-trip tests in `tests/test_protocol.py` and `tests/test_value.py`.
+- Fuzz-style tests in `tests/test_fuzz.py`: seeded random input to `parse`, `Value.from_bytes`,
+  `decode_records`, and the client reply parser, asserting only expected exceptions escape.
 - Command-level tests in `tests/test_commands.py` (ACLs, typed values, TTL, pub/sub, recovery).
 - Integration tests in `tests/test_server.py` start WS + TCP listeners on ephemeral ports.
 - Persistence tests: WAL round-trip, truncated-tail tolerance, reset, snapshot round-trip.
@@ -419,7 +425,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 - **M3 — Persistence:** WAL + snapshot + recovery tests. *(implemented; WAL compaction pending)*
 - **M4 — Auth:** token file, per-client namespaces, coarse ACLs, scrypt token hashing.
   *(implemented)*
-- **M5 — Hardening:** browser load/perf pages; fuzz tests, Python client pending.
+- **M5 — Hardening:** browser load/perf pages; fuzz tests; async client library. *(implemented)*
 
 ## 18. Decision log
 
@@ -446,6 +452,15 @@ Notable decisions future work must respect (newest last).
   deadlines (`time.time`) so M3 can persist them; expiry is lazy on access. `INCR`/`DECR` create a
   missing key as `i32`, preserve the existing integer type and TTL, and range-check the result.
   `SCAN` uses an integer index into the sorted key list (a simplification; see §14.10).
+- **2026-10-06 — Client library.** `creek.client` is async, supports both transports, decodes
+  replies to native Python, and raises `CommandError` on server errors. `subscribe()` is an async
+  generator; a subscribed client must not run other commands concurrently. It lives in the package
+  (not a separate distribution).
+- **2026-10-06 — Browser pages.** `web/` is dependency-free ES modules (`bench.js`) served by the
+  WS listener: `index.html`, `loadtest.html`, `perf.html`. No CDNs, so they work offline.
+- **2026-10-06 — Fuzzing.** `tests/test_fuzz.py` uses seeded `random` (no property-testing
+  dependency) to check the parsers only raise expected exceptions and that the value codec is
+  canonical.
 - **2026-10-06 — Auth token hashing.** Tokens may be plaintext or `scrypt$n$r$p$salt$hash`
   (stdlib `hashlib.scrypt`, n=2^14, r=8, p=1). `authenticate` tries every verifier so the timing
   does not reveal which client matched. `hash_token()` and `scripts/hash_token.py` generate hashes.
