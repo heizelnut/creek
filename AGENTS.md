@@ -34,8 +34,8 @@ directions unless this file is updated first.
 
 - Treat this as the source of truth for architecture and conventions. If code and this file
   disagree, fix the code or update this file — do not silently diverge.
-- Before finishing a task: run `uv run ruff format --check .`, `uv run ruff check .`,
-  `uv run mypy src`, and `uv run pytest -q`. All four must pass.
+- Before finishing a task: run `ruff format --check .`, `ruff check .`, `mypy src`, and
+  `pytest -q` (prefix with `uv run` when not in an activated venv). All four must pass.
 - Prefer the standard library. Any new third-party dependency must be justified in the PR/commit
   message and, if structural, recorded in §12.
 - Keep public behavior changes documented here and in `PROTOCOL.md`.
@@ -43,14 +43,36 @@ directions unless this file is updated first.
 
 ## 3. Quick start
 
+Requires **Python 3.12+**. Use either **uv** (fast, locks the interpreter) or plain **pip**.
+
+### With uv
+
 ```bash
-# create the virtualenv and install the package + dev tools
-uv sync
+uv sync                          # creates .venv, installs deps + dev group
+uv run creek                     # WS + static :7100, TCP :7101
+uv run pytest -q
+uv run pytest -q -k tcp          # one transport
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src
+```
 
-# run with defaults (WS + static :7100, TCP :7101), anonymous access
-uv run creek
+### With pip
 
-# run with persistence and a token file
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"         # [dev] adds pytest, ruff, mypy
+creek
+pytest -q
+ruff format --check .
+ruff check .
+mypy src
+```
+
+With persistence and a token file (drop the `uv run` prefix under pip):
+
+```bash
 uv run creek \
   --ws-addr :7100 \
   --tcp-addr :7101 \
@@ -59,22 +81,12 @@ uv run creek \
   --auth-file ./auth.json \
   --fsync everysec \
   --snapshot-interval 5m
-
-# tests
-uv run pytest -q
-uv run pytest -q -k tcp          # one transport
-
-# lint / type-check
-uv run ruff format --check .
-uv run ruff check .
-uv run mypy src
-
-# browser load / performance tests
-uv run creek                     # then open http://localhost:7100/
 ```
 
-- Requires **Python 3.12+** (local Homebrew interpreter is 3.14). `uv` manages the interpreter and
-  venv. If interpreter discovery breaks, pin it: `uv sync --python /opt/homebrew/bin/python3.14`.
+- Dev dependencies are declared in **both** `[project.optional-dependencies].dev` (pip) and
+  `[dependency-groups].dev` (uv); `tests/test_packaging.py` fails if they drift.
+- On this machine the system interpreter is old and `/usr/local/bin/python` is broken. If uv
+  discovery fails, pin it: `uv sync --python /opt/homebrew/bin/python3.14`.
 - Entry point: console script `creek = creek.cli:main`; also `python -m creek`.
 - Flags (all parsed in `src/creek/cli.py` via `argparse`): `--ws-addr`, `--tcp-addr`, `--web-dir`,
   `--data-dir`, `--auth-file`, `--fsync` (`always|everysec|no`), `--snapshot-interval`.
@@ -312,6 +324,10 @@ Prefer the standard library. Current external dependencies:
 a logging framework; stdlib `logging` is the logging standard. `aiohttp`/`uvicorn`/FastAPI are out
 of scope: Creek speaks its own protocol, not HTTP APIs.
 
+Dev dependencies are listed twice — `[project.optional-dependencies].dev` for pip and
+`[dependency-groups].dev` for uv — because pip cannot read PEP 735 groups. `uv.lock` is committed.
+`tests/test_packaging.py` asserts the two lists are identical, so update both when adding a tool.
+
 ## 13. Testing and quality (planned)
 
 - Table-driven (parametrized) unit tests for `value`, `pattern`, `protocol`, `store`, and `pubsub`.
@@ -396,6 +412,9 @@ Notable decisions future work must respect (newest last).
   `command/`, `server/`) was collapsed into single modules (`protocol.py`, `commands.py`,
   `server.py`): the indirection cost more than it explained. The RESP parser is a pure function
   over bytes, shared by both transports. See §5 and §15; the TCP re-parse trade-off is §14.9.
+- **2026-10-06 — uv and pip both supported.** uv is the agent-default (locks the interpreter,
+  `uv.lock`), but the project is pip-installable: `pip install -e ".[dev]"`. Dev deps are declared
+  in both the PEP 621 extra and the PEP 735 group, guarded by `tests/test_packaging.py`. See §3.
 
 ---
 

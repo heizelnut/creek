@@ -8,12 +8,24 @@ persists to disk with a write-ahead log plus periodic snapshots.
 > **Status:** early implementation (M0 skeleton). See `AGENTS.md` for the full architecture and
 > `PROTOCOL.md` for the wire specification.
 
+Requires **Python 3.12+**. The project works with either **uv** or plain **pip**.
+
 ## Quick start
+
+### With uv
 
 ```bash
 uv sync
 uv run creek                    # WS + static :7100, TCP :7101
-uv run pytest -q
+```
+
+### With pip
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"         # the [dev] extra adds pytest, ruff, mypy
+creek
 ```
 
 Then connect:
@@ -37,9 +49,20 @@ asyncio.run(main())
 
 ## Development
 
+Both environments run the same checks.
+
 ```bash
+# with uv
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src
 uv run pytest -q
+```
+
+```bash
+# with pip (virtualenv activated)
+ruff format --check .
+ruff check .
+mypy src
+pytest -q
 ```
