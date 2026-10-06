@@ -66,3 +66,14 @@ ruff check .
 mypy src
 pytest -q
 ```
+
+## Benchmark
+
+`scripts/bench.py` starts a server in a child process and drives it with concurrent clients,
+reporting throughput and latency percentiles. Treat the numbers as a regression baseline.
+
+```bash
+uv run python scripts/bench.py --command ping --clients 10 --requests 1000
+uv run python scripts/bench.py --transport tcp --command set
+uv run python scripts/bench.py --command publish --subscribers 5
+```

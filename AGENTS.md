@@ -156,6 +156,7 @@ creek/
 │   └── persist.py      WAL + snapshots (M3)
 ├── tests/          test_protocol.py test_commands.py test_auth.py
 │                   test_cli.py test_server.py test_value.py ...
+├── scripts/        bench.py (load/benchmark harness)
 └── web/            index.html loadtest.html perf.html bench.js
 ```
 
@@ -336,6 +337,9 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 - Command-level tests in `tests/test_commands.py` (ACLs, typed values, TTL, pub/sub, recovery).
 - Integration tests in `tests/test_server.py` start WS + TCP listeners on ephemeral ports.
 - Persistence tests: WAL round-trip, truncated-tail tolerance, reset, snapshot round-trip.
+- **Developer benchmark:** `scripts/bench.py` starts a server in a child process and drives it with
+  concurrent clients (`--transport ws|tcp`, `--command ping|set|get|publish`), printing throughput
+  and p50/p95/p99/max latency. It is a regression baseline, not a promise.
 - **Browser load and performance tests** live in `web/` and are served by the WS listener:
   - `web/index.html` — landing page.
   - `web/loadtest.html` — many concurrent WS clients, live ops/s chart, latency percentiles.
@@ -437,6 +441,10 @@ Notable decisions future work must respect (newest last).
   deadlines (`time.time`) so M3 can persist them; expiry is lazy on access. `INCR`/`DECR` create a
   missing key as `i32`, preserve the existing integer type and TTL, and range-check the result.
   `SCAN` uses an integer index into the sorted key list (a simplification; see §14.10).
+- **2026-10-06 — Benchmark harness.** `scripts/bench.py` runs the server in a **child process**
+  (the load generator and server must not share an event loop) and reports throughput + latency
+  percentiles. It is deliberately thin and lives outside `src/` (not part of the package). Browser
+  charts stay in M5. See §13.
 - **2026-10-06 — Persistence.** WAL records are ``u32 length || u32 CRC32 || UTF-8 JSON`` with
   values as base64 of `Value.to_bytes()`; a truncated/corrupt tail is tolerated. Snapshots are a
   versioned JSON document written atomically (temp → fsync → rename → dir fsync). The `Wal` runs a
