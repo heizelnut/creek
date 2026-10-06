@@ -305,3 +305,9 @@ violations return `ERR wrong number of arguments for '<cmd>'`.
 - Both transports track RESP2 framing; WebSocket adds message framing only.
 - Storage formats will be versioned separately (`persist.SNAPSHOT_VERSION`, and the
   value codec's type byte); see `AGENTS.md` §10.
+
+Planned additions (see `AGENTS.md` §17):
+
+- A `HELLO` handshake to negotiate protocol version and capabilities.
+- Cluster redirection (`MOVED`/`ASK`) and `CLUSTER` introspection for M7b.
+- Tenant administration commands (`TENANT …`) for M6.

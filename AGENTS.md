@@ -18,8 +18,8 @@ Core traits:
 
 - **In-memory** hot path, **on-disk** durability (write-ahead log + snapshots).
 - **Primitive, typed values** — fixed-width integers, floats, strings, and booleans (see §6).
-- **Auth exists to identify the client**, so the correct namespace is applied. It is not a general
-  multi-tenant security boundary in v1 (see §8).
+- **Auth identifies the client and selects its namespace.** Namespaces scope data today; turning
+  them into hard, isolated tenants is a future milestone (see §8 and §17 M6).
 - **WebSocket is the native transport**; both WebSocket and plain **TCP** speak the same
   **RESP2** subset (WebSocket is framing only, one command per binary frame).
 - **Single asyncio event loop** owns all mutable state; blocking work is offloaded (see §11).
@@ -27,8 +27,10 @@ Core traits:
 - **Redis-like command surface** (see §7 and `PROTOCOL.md`).
 
 Creek is *not* (v1 non-goals): a Redis drop-in replacement, a general document store, a SQL
-database, a distributed/clustered system, or a full RBAC platform. Avoid scope creep in these
-directions unless this file is updated first.
+database, or a full RBAC platform. **v1 is single-node** and namespaces are a scoping mechanism,
+not a hard tenant boundary: multitenancy (**M6**) and clustering (**M7**) are planned future
+milestones (§17), not v1 features. Avoid scope creep in these directions unless this file is
+updated first.
 
 ## 2. How to use this file (agents)
 
@@ -268,6 +270,13 @@ Auth file schema:
 }
 ```
 
+### Path to multitenancy
+
+Today a "namespace" is a scoping prefix on keys and channels, not a hard isolation boundary: one
+process, one store, one WAL, coarse ACLs. The data model is already tenant-ready — every entry
+carries its owner and every WAL record is tagged — so **M6** (§17) can promote namespaces to real
+tenants (lifecycle, quotas, per-tenant metrics/persistence) without a format change.
+
 ## 9. Transports and framing
 
 - **WebSocket (native):** framing only. Each binary frame carries exactly one RESP2
@@ -370,8 +379,10 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 5. **Token hashing** — *resolved*: stdlib `hashlib.scrypt`, plaintext still accepted for dev.
    Revisit Argon2id only if scrypt proves insufficient.
 6. **Anonymous default** — allowed when no `--auth-file` is given.
-7. **Python client library** (`creek-client`) — not yet implemented.
-8. **Clustering** — explicitly out of scope for v1.
+7. **Python client library** — *resolved*: `creek.client` (async, both transports). A separate
+   `creek-client` distribution is still optional.
+8. **Clustering** — v1 is single-node. Planned as **M7** (§17) in phases; treat as exploratory and
+   do not let it shape v1 code.
 9. **Streaming parser re-parse** — the TCP reader re-parses its buffer from the start after each
    read (simplest correct approach). Add a cursor if very large commands become a real workload.
 10. **SCAN cursor** — an index into the sorted key list, not a reverse-binary cursor like Redis;
@@ -381,6 +392,9 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
     `pmessage` form if that's needed.
 12. **Pub/sub channel scoping** — channels are scoped by namespace (owner), like keys. Decide
     whether cross-namespace channels are ever wanted.
+13. **Multitenancy isolation** — namespaces share one process, store, and WAL. **M6** (§17) defines
+    quotas, lifecycle, and optional per-tenant persistence. Decide whether a tenant can be exported
+    or moved between nodes (this interacts with M7b sharding).
 
 ## 15. Coding conventions
 
@@ -422,10 +436,26 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
   *(implemented)*
 - **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
   *(implemented)*
-- **M3 — Persistence:** WAL + snapshot + recovery tests. *(implemented; WAL compaction pending)*
+- **M3 — Persistence:** WAL + snapshot + recovery tests. *(implemented; WAL compaction added in M4)*
 - **M4 — Auth:** token file, per-client namespaces, coarse ACLs, scrypt token hashing.
   *(implemented)*
 - **M5 — Hardening:** browser load/perf pages; fuzz tests; async client library. *(implemented)*
+- **M6 — Multitenancy:** promote namespaces to first-class tenants with lifecycle and limits.
+  - Admin API: `TENANT CREATE|LIST|DROP|INFO` (admin scope), journaled.
+  - Quotas: keys, approximate memory, connections, subscriptions, and command rate per tenant;
+    quota failures return a `QUOTA` error.
+  - Per-tenant observability (`INFO tenant`, counters) and optional per-tenant WAL/snapshot files
+    (the data model already tags every entry and WAL record with its owner).
+  - Isolation hardening: key/channel length limits, no cross-tenant enumeration, audit logging of
+    admin actions. Requires `--auth-file`.
+- **M7 — Clustering (multi-phase; exploratory):** v1 is single-node and nothing in it assumes a
+  cluster.
+  - **M7a — Read replicas:** one writer, N followers streaming the WAL; `ROLE` / `INFO replication`;
+    clients may read from any node.
+  - **M7b — Sharding:** hash-slot partitioning (e.g. 16384 slots), `CLUSTER` commands, and
+    `MOVED`/`ASK` redirects; a cluster-aware client or a stateless proxy.
+  - **M7c — Failover:** membership and failure detection, leader election (Raft-style), automatic
+    promotion, and cluster-wide pub/sub routing (the hardest part).
 
 ## 18. Decision log
 
@@ -471,6 +501,11 @@ Notable decisions future work must respect (newest last).
   (the load generator and server must not share an event loop) and reports throughput + latency
   percentiles. It is deliberately thin and lives outside `src/` (not part of the package). Browser
   charts stay in M5. See §13.
+- **2026-10-06 — Roadmap extended: multitenancy and clustering.** v1 stays single-node with
+  namespace scoping. §1 (non-goals), §8 (auth), and §14 were updated so they no longer contradict
+  the roadmap; **M6** (multitenancy) and **M7** (clustering, multi-phase) are now planned.
+  Multitenancy builds on the existing owner tagging; clustering is exploratory and must not shape
+  v1 code.
 - **2026-10-06 — Persistence.** WAL records are ``u32 length || u32 CRC32 || UTF-8 JSON`` with
   values as base64 of `Value.to_bytes()`; a truncated/corrupt tail is tolerated. Snapshots are a
   versioned JSON document written atomically (temp → fsync → rename → dir fsync). The `Wal` runs a
