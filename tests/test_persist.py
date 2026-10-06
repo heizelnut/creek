@@ -168,6 +168,22 @@ async def test_survives_restart(tmp_path: Path) -> None:
         await second.close()
 
 
+async def test_snapshot_compacts_the_wal(tmp_path: Path) -> None:
+    first = Server(_config(tmp_path))
+    await first.start()
+    first.store.set("default", "k", _value("v"))
+    await first.close()
+    # Nothing raced the shutdown snapshot, so the WAL was truncated.
+    assert (tmp_path / "creek.wal").read_bytes() == b""
+
+    second = Server(_config(tmp_path))
+    await second.start()
+    try:
+        assert second.store.get("default", "k") == _value("v")
+    finally:
+        await second.close()
+
+
 async def test_recovers_from_wal_only(tmp_path: Path) -> None:
     records = [
         encode_record(

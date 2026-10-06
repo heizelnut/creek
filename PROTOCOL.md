@@ -1,7 +1,8 @@
 # Creek Protocol
 
-> **Status: implemented through M3.** The framing, connection/admin, key–value, and pub/sub
-> commands exist over both transports, with WAL + snapshot persistence (see `AGENTS.md` §17).
+> **Status: implemented through M4.** The framing, connection/admin, key–value, and pub/sub
+> commands exist over both transports, with WAL + snapshot persistence and token hashing
+> (see `AGENTS.md` §17).
 
 There is **one command model** and **one codec** (a RESP2 subset). It is carried by
 two transports:

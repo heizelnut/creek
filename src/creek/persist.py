@@ -94,9 +94,15 @@ class Wal:
         self._path = path
         self._fsync = fsync
         self._file = path.open("ab")
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
         self._last_sync = 0.0
+        self._mutations = 0
+
+    @property
+    def mutations(self) -> int:
+        """Records appended so far (used to gate compaction)."""
+        return self._mutations
 
     def start(self) -> None:
         """Start the background writer task."""
@@ -104,8 +110,11 @@ class Wal:
 
     async def _run(self) -> None:
         while True:
-            data = await self._queue.get()
-            await asyncio.to_thread(self._write, data)
+            item = await self._queue.get()
+            if item is None:
+                await asyncio.to_thread(self._truncate)
+            else:
+                await asyncio.to_thread(self._write, item)
             self._queue.task_done()
 
     def _write(self, data: bytes) -> None:
@@ -121,7 +130,26 @@ class Wal:
 
     def append(self, record: dict[str, Any]) -> None:
         """Queue a record for writing (never blocks)."""
+        self._mutations += 1
         self._queue.put_nowait(encode_record(record))
+
+    async def compact(self, mutations_before: int) -> bool:
+        """Truncate the log if nothing was written since ``mutations_before``.
+
+        Call this right after a snapshot: every record up to that point is now
+        in the snapshot. If a write raced the snapshot, the log is left intact.
+        Returns whether compaction ran.
+        """
+        await self._queue.join()
+        if self._mutations != mutations_before:
+            return False
+        self._queue.put_nowait(None)
+        return True
+
+    def _truncate(self) -> None:
+        self._file.truncate(0)
+        self._file.flush()
+        os.fsync(self._file.fileno())
 
     # --- Journal protocol ---
 
@@ -150,7 +178,7 @@ class Wal:
     async def close(self) -> None:
         """Drain the queue, fsync, and close the file."""
         if self._task is not None:
-            await self._queue.join()
+            await self._queue.join()  # also waits for any queued truncation
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task

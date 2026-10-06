@@ -45,14 +45,14 @@ async def test_quit_requests_close() -> None:
 
 
 async def test_auth_required_when_anonymous_disabled() -> None:
-    context = Context(authenticator=Authenticator({}, allow_anonymous=False))
+    context = Context(authenticator=Authenticator.from_tokens({}, allow_anonymous=False))
     with pytest.raises(CommandError) as info:
         await execute(Command("INFO"), context)
     assert info.value.code == "NOAUTH"
 
 
 async def test_set_requires_auth_when_anonymous_disabled() -> None:
-    context = Context(authenticator=Authenticator({}, allow_anonymous=False))
+    context = Context(authenticator=Authenticator.from_tokens({}, allow_anonymous=False))
     with pytest.raises(CommandError) as info:
         await execute(Command("SET", ("k", "v")), context)
     assert info.value.code == "NOAUTH"
@@ -60,14 +60,14 @@ async def test_set_requires_auth_when_anonymous_disabled() -> None:
 
 async def test_auth_selects_identity() -> None:
     identity = Identity("sensor-a", "sensors", frozenset({"all"}))
-    authenticator = Authenticator({"t1": identity}, allow_anonymous=False)
+    authenticator = Authenticator.from_tokens({"t1": identity}, allow_anonymous=False)
     context = Context(authenticator=authenticator)
     assert await execute(Command("AUTH", ("t1",)), context) == SimpleString("OK")
     assert context.identity is identity
 
 
 async def test_auth_rejects_bad_token() -> None:
-    context = Context(authenticator=Authenticator({}, allow_anonymous=False))
+    context = Context(authenticator=Authenticator.from_tokens({}, allow_anonymous=False))
     with pytest.raises(CommandError) as info:
         await execute(Command("AUTH", ("bad",)), context)
     assert info.value.code == "WRONGPASS"

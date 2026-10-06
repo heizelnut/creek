@@ -156,7 +156,7 @@ creek/
 │   └── persist.py      WAL + snapshots (M3)
 ├── tests/          test_protocol.py test_commands.py test_auth.py
 │                   test_cli.py test_server.py test_value.py ...
-├── scripts/        bench.py (load/benchmark harness)
+├── scripts/        bench.py (load/benchmark harness), hash_token.py
 └── web/            index.html loadtest.html perf.html bench.js
 ```
 
@@ -242,8 +242,11 @@ Auth exists to **recognize the client and select its namespace**, not to be a fu
 boundary in v1.
 
 - `AUTH <token>` resolves a token to `Identity(id, namespace, acl)`.
-- Token store: a JSON file (`--auth-file`, see `creek.auth`), loaded with `auth.load_file`.
-  Tokens are compared with `hmac.compare_digest` (constant time).
+- Token store: a JSON file (`--auth-file`, see `creek.auth`), loaded with `Authenticator.from_file`.
+  Tokens are compared with `hmac.compare_digest` (constant time). A token may be stored plaintext
+  (development) or hashed with scrypt; a hashed token is a string starting with `scrypt$`
+  (`hash_token()` / `scripts/hash_token.py` generate them). Each `authenticate` tries every stored
+  verifier, so the work is constant-time across clients.
 - When `--auth-file` is omitted, anonymous access is allowed with a full ACL.
 - ACLs are coarse: `read`, `write`, `subscribe`, `admin` (or `all`/`*`).
 - Every command handler receives the resolved identity; the store owner is derived from it. Never
@@ -256,7 +259,7 @@ Auth file schema:
   "allow_anonymous": false,
   "clients": [
     {"id": "sensor-a", "namespace": "sensors", "token": "t1", "acl": ["read", "subscribe"]},
-    {"id": "admin", "token": "t2", "acl": ["all"]}
+    {"id": "admin", "token": "scrypt$16384$8$1$<salt>$<hash>", "acl": ["all"]}
   ]
 }
 ```
@@ -355,10 +358,11 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
    Revisit if a stdlib-only server becomes a hard requirement.
 2. **Nibble packing** for `i4`/`u4` — the design byte-masks them; pack two per byte?
 3. **`f8` variants** — E4M3 is the only planned variant; add E5M2?
-4. **WAL compaction/rotation** — snapshots do not truncate the WAL; add prefix truncation.
-   Until then, a restart replays the whole WAL after the snapshot (idempotent).
-5. **Token hashing** — plaintext tokens at rest. Prefer stdlib `hashlib.scrypt` (no dependency) or
-   Argon2id via `argon2-cffi`?
+4. **WAL compaction/rotation** — *resolved*: after a snapshot the WAL is truncated when no write
+   raced the snapshot (`Wal.compact`); otherwise it is left intact. Under sustained writes the log
+   grows until a quiet snapshot.
+5. **Token hashing** — *resolved*: stdlib `hashlib.scrypt`, plaintext still accepted for dev.
+   Revisit Argon2id only if scrypt proves insufficient.
 6. **Anonymous default** — allowed when no `--auth-file` is given.
 7. **Python client library** (`creek-client`) — not yet implemented.
 8. **Clustering** — explicitly out of scope for v1.
@@ -413,7 +417,8 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 - **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
   *(implemented)*
 - **M3 — Persistence:** WAL + snapshot + recovery tests. *(implemented; WAL compaction pending)*
-- **M4 — Auth:** token file, per-client namespaces, coarse ACLs. (token hashing pending)
+- **M4 — Auth:** token file, per-client namespaces, coarse ACLs, scrypt token hashing.
+  *(implemented)*
 - **M5 — Hardening:** browser load/perf pages; fuzz tests, Python client pending.
 
 ## 18. Decision log
@@ -441,6 +446,12 @@ Notable decisions future work must respect (newest last).
   deadlines (`time.time`) so M3 can persist them; expiry is lazy on access. `INCR`/`DECR` create a
   missing key as `i32`, preserve the existing integer type and TTL, and range-check the result.
   `SCAN` uses an integer index into the sorted key list (a simplification; see §14.10).
+- **2026-10-06 — Auth token hashing.** Tokens may be plaintext or `scrypt$n$r$p$salt$hash`
+  (stdlib `hashlib.scrypt`, n=2^14, r=8, p=1). `authenticate` tries every verifier so the timing
+  does not reveal which client matched. `hash_token()` and `scripts/hash_token.py` generate hashes.
+- **2026-10-06 — WAL compaction.** `Server._snapshot` captures the mutation counter, writes the
+  snapshot, then calls `Wal.compact`: if the counter is unchanged it enqueues a truncate marker the
+  writer task applies (dropping records already in the snapshot); otherwise the log is left intact.
 - **2026-10-06 — Benchmark harness.** `scripts/bench.py` runs the server in a **child process**
   (the load generator and server must not share an event loop) and reports throughput + latency
   percentiles. It is deliberately thin and lives outside `src/` (not part of the package). Browser

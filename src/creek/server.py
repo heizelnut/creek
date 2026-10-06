@@ -173,9 +173,13 @@ class Server:
         data_dir = self.config.data_dir
         if data_dir is None:
             return
+        journal = self.journal
+        mutations = journal.mutations if journal is not None else 0
         entries = self.store.entries()
         retained = self.bus.retained_entries()
         await asyncio.to_thread(write_snapshot, data_dir / "creek.snapshot", entries, retained)
+        if journal is not None:
+            await journal.compact(mutations)
 
     async def _snapshot_loop(self) -> None:
         while True:

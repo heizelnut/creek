@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from creek.auth import AuthConfigError, Authenticator, Identity
+from creek.auth import AuthConfigError, Authenticator, Identity, ScryptHash, hash_token
 
 
 def _write(tmp_path: Path, data: object) -> Path:
@@ -51,3 +51,37 @@ def test_load_file_rejects_missing_client_token(tmp_path: Path) -> None:
 def test_load_file_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(AuthConfigError):
         Authenticator.from_file(tmp_path / "missing.json")
+
+
+def test_hash_token_roundtrip() -> None:
+    stored = hash_token("my-secret")
+    assert stored.startswith("scrypt$")
+    verifier = ScryptHash.parse(stored)
+    assert verifier.verify("my-secret") is True
+    assert verifier.verify("wrong") is False
+
+
+def test_load_file_with_hashed_token(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        {
+            "allow_anonymous": False,
+            "clients": [
+                {
+                    "id": "sensor-a",
+                    "namespace": "sensors",
+                    "token": hash_token("t1"),
+                    "acl": ["read"],
+                }
+            ],
+        },
+    )
+    auth = Authenticator.from_file(path)
+    identity = auth.authenticate("t1")
+    assert identity is not None and identity.namespace == "sensors"
+    assert auth.authenticate("nope") is None
+
+
+def test_scrypt_hash_parse_rejects_garbage() -> None:
+    with pytest.raises(AuthConfigError):
+        ScryptHash.parse("scrypt$not-a-number$x$y$z$w")
