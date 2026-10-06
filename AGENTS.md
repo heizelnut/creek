@@ -3,23 +3,27 @@
 > Instructions and shared context for AI coding agents (and humans) working in this repository.
 > Read this file completely before making changes. Update it whenever you make a decision that
 > future work must respect. See also `PROTOCOL.md` for the wire specification.
+>
+> **Status: early implementation.** The design targets **async Python (asyncio)**. `AGENTS.md` and
+> `PROTOCOL.md` describe the intended architecture; the M0 skeleton (`src/creek/`, `tests/`) exists
+> and runs both transports. The roadmap (§17) is the authoritative record of what is built.
 
 ## 1. What Creek is
 
-Creek is a Redis-like, in-memory key–value store written in Go whose primary workload is
-**typed publish/subscribe**. It keeps its working set in RAM and persists to disk for durability.
+Creek is a Redis-like, in-memory key–value store in **async Python** whose primary workload is
+**typed publish/subscribe**. The design keeps its working set in RAM and persists to disk for
+durability.
 
 Core traits:
 
 - **In-memory** hot path, **on-disk** durability (write-ahead log + snapshots).
 - **Primitive, typed values** — fixed-width integers, floats, strings, and booleans (see §6).
-- **Per-client index** — currently a naive, on-demand placeholder (see §8). The real-time
-  auto-optimization (incremental trie + heuristics) is deliberately deferred.
-- **Auth exists to identify the client**, so the correct per-client index and namespace are applied.
-  It is not a general multi-tenant security boundary in v1 (see §9).
-- **WebSocket is the native transport** (JSON envelope); plain **TCP** speaks a RESP subset.
+- **Auth exists to identify the client**, so the correct namespace is applied. It is not a general
+  multi-tenant security boundary in v1 (see §8).
+- **WebSocket is the native transport**; both WebSocket and plain **TCP** speak the same
+  **RESP2** subset (WebSocket is framing only, one command per binary frame).
+- **Single asyncio event loop** owns all mutable state; blocking work is offloaded (see §11).
 - **TLS is out of scope** — terminate it at a reverse proxy in front of the TCP listener.
-- Every entry (key/value or retained channel message) can carry one **metadata tag**.
 - **Redis-like command surface** (see §7 and `PROTOCOL.md`).
 
 Creek is *not* (v1 non-goals): a Redis drop-in replacement, a general document store, a SQL
@@ -30,24 +34,24 @@ directions unless this file is updated first.
 
 - Treat this as the source of truth for architecture and conventions. If code and this file
   disagree, fix the code or update this file — do not silently diverge.
-- Before finishing a task: run `gofmt -l .`, `go vet ./...`, `go build ./...`, and
-  `go test -race ./...`.
+- Before finishing a task: run `uv run ruff format --check .`, `uv run ruff check .`,
+  `uv run mypy src`, and `uv run pytest -q`. All four must pass.
 - Prefer the standard library. Any new third-party dependency must be justified in the PR/commit
-  message and, if structural, recorded in §13.
+  message and, if structural, recorded in §12.
 - Keep public behavior changes documented here and in `PROTOCOL.md`.
-- Anything marked **DECISION PENDING** in §15 is an open question: ask before assuming.
+- Anything marked **DECISION PENDING** in §14 is an open question: ask before assuming.
 
 ## 3. Quick start
 
 ```bash
-# build
-go build ./...
+# create the virtualenv and install the package + dev tools
+uv sync
 
 # run with defaults (WS + static :7100, TCP :7101), anonymous access
-go run ./cmd/creek
+uv run creek
 
 # run with persistence and a token file
-go run ./cmd/creek \
+uv run creek \
   --ws-addr :7100 \
   --tcp-addr :7101 \
   --web-dir ./web \
@@ -57,121 +61,122 @@ go run ./cmd/creek \
   --snapshot-interval 5m
 
 # tests
-go test ./...
-go test -race ./...
+uv run pytest -q
+uv run pytest -q -k tcp          # one transport
+
+# lint / type-check
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src
 
 # browser load / performance tests
-go run ./cmd/creek           # then open http://localhost:7100/
+uv run creek                     # then open http://localhost:7100/
 ```
 
-Module path: `github.com/heizelnut/creek`.
-
-Flags (all in `cmd/creek/main.go`): `--ws-addr`, `--tcp-addr`, `--web-dir`, `--data-dir`,
-`--auth-file`, `--fsync` (`always|everysec|no`), `--snapshot-interval`.
+- Requires **Python 3.12+** (local Homebrew interpreter is 3.14). `uv` manages the interpreter and
+  venv. If interpreter discovery breaks, pin it: `uv sync --python /opt/homebrew/bin/python3.14`.
+- Entry point: console script `creek = creek.cli:main`; also `python -m creek`.
+- Flags (all parsed in `src/creek/cli.py` via `argparse`): `--ws-addr`, `--tcp-addr`, `--web-dir`,
+  `--data-dir`, `--auth-file`, `--fsync` (`always|everysec|no`), `--snapshot-interval`.
 
 ## 4. Architecture at a glance
 
 ```
-             WebSocket (native)        TCP (RESP)
+        WebSocket (RESP frames)     TCP (RESP stream)
                    │                     │
                    └──────────┬──────────┘
                               ▼
                     ┌───────────────────────────────┐
-                    │        Transport layer        │  internal/server
+                    │        Transport layer        │  creek.server
                     │  accept, frame, decode/encode │
                     └───────────────┬───────────────┘
                                     ▼
                     ┌───────────────────────────────┐
-                    │      Protocol / command       │  internal/protocol, internal/command
+                    │      Protocol / command       │  creek.protocol, creek.commands
                     │  parse → typed Command → exec │
                     └───────┬───────────────┬───────┘
                             ▼               ▼
               ┌──────────────────┐   ┌──────────────────┐
               │   Store (KV)     │   │   Pub/Sub bus    │
-              │  keys+tags+TTL   │   │ subs + fanout    │
+              │   keys + TTL     │   │ subs + fanout    │
               └────────┬─────────┘   └────────┬─────────┘
                        └──────────┬───────────┘
                                   ▼
                     ┌───────────────────────────────┐
-                    │   Index (per client, naive)   │  internal/index
-                    │  on-demand tree over records  │
-                    └───────────────┬───────────────┘
-                                    ▼
-                    ┌───────────────────────────────┐
-                    │   Persistence (WAL+snapshot)  │  internal/persist
+                    │   Persistence (WAL+snapshot)  │  creek.persist
                     └───────────────────────────────┘
 ```
 
-| Component | Package | Responsibility |
+| Component | Module | Responsibility |
 |---|---|---|
-| Transports | `internal/server` | WS/TCP listeners, framing, session lifecycle |
-| Protocol | `internal/protocol` | Codecs: RESP (TCP) and JSON envelope (WS) |
-| Commands | `internal/command` | Registry, dispatch, ACLs, per-client indexes, WAL logging |
-| Value model | `internal/value` | Primitive types, codecs, arithmetic |
-| Patterns | `internal/pattern` | Glob and segment-aware matching |
-| Store | `internal/store` | Single-map in-memory KV, TTL, owner metadata |
-| Pub/Sub | `internal/pubsub` | Subscription registry, pattern matching, fanout, retained |
-| Index | `internal/index` | Naive per-client record set; tree derived on demand |
-| Auth | `internal/auth` | Client identification → identity + namespace |
-| Persistence | `internal/persist` | WAL, snapshots, recovery |
-| CLI | `cmd/creek` | Flags, wiring, lifecycle, signals, snapshots |
+| Transports | `creek.server` | asyncio TCP/WS listeners, framing, static files |
+| Protocol | `creek.protocol` | RESP2 codec: pure `parse` / `encode` functions |
+| Commands | `creek.commands` | Registry, dispatch, ACLs, built-in handlers |
+| Value model | `creek.value` | (M1) Primitive types, codecs, arithmetic |
+| Patterns | `creek.pattern` | (M1) Glob matching |
+| Store | `creek.store` | (M1) Single-dict in-memory KV, TTL, namespace ownership |
+| Pub/Sub | `creek.pubsub` | (M2) Subscription registry, pattern matching, fanout, retained |
+| Auth | `creek.auth` | Client identification → identity + namespace |
+| Persistence | `creek.persist` | (M3) WAL, snapshots, recovery |
+| CLI | `creek.cli` | Flags, wiring, lifecycle, signals, snapshots |
 | Browser tests | `web/` | Load and performance pages (`bench.js`) |
 
-## 5. Repository layout (current)
+## 5. Repository layout (target)
 
 ```
 creek/
 ├── AGENTS.md
 ├── PROTOCOL.md
-├── go.mod / go.sum
-├── cmd/creek/main.go
-├── internal/
-│   ├── server/     server.go tcp.go ws.go server_test.go
-│   ├── protocol/   protocol.go resp.go json.go protocol_test.go
-│   ├── command/    engine.go commands_kv.go commands_pubsub.go
-│   │               commands_index.go commands_admin.go command_test.go
-│   ├── value/      value.go codec.go ops.go value_test.go
-│   ├── pattern/    pattern.go pattern_test.go
-│   ├── store/      store.go store_test.go
-│   ├── pubsub/     bus.go bus_test.go
-│   ├── index/      index.go index_test.go
-│   ├── auth/       auth.go auth_test.go
-│   └── persist/    wal.go snapshot.go persist_test.go
+├── pyproject.toml
+├── uv.lock
+├── src/creek/
+│   ├── __init__.py __main__.py
+│   ├── cli.py          flags, Config, lifecycle
+│   ├── server.py       TCP + WebSocket listeners, static files
+│   ├── protocol.py     RESP2 codec (pure parse/encode)
+│   ├── commands.py     registry, dispatch, built-in commands
+│   ├── auth.py         token -> Identity
+│   ├── errors.py       ProtocolError, CommandError
+│   ├── value.py        (M1) typed values
+│   ├── store.py        (M1) keys + TTL
+│   ├── pattern.py      (M1) glob matching
+│   ├── pubsub.py       (M2) subscriptions
+│   └── persist.py      (M3) WAL + snapshots
+├── tests/          test_protocol.py test_commands.py test_auth.py
+│                   test_cli.py test_server.py test_value.py ...
 └── web/            index.html loadtest.html perf.html bench.js
 ```
 
-`pkg/client` (a Go client library) is planned but not yet implemented.
+A `creek-client` Python client package is planned but not yet implemented (see §14).
 
 ## 6. Value model
 
 Every value is a tagged primitive. The type is part of the value, not inferred at read time.
 
-| Tag | Meaning | Width | Range / notes |
+| Tag | Meaning | Width | Python storage / range |
 |---|---|---|---|
-| `i4`  | signed int   | 4 bits  | −8 … 7 (stored masked in a byte) |
-| `u4`  | unsigned int | 4 bits  | 0 … 15 (stored masked in a byte) |
-| `i8` / `u8`   | signed/unsigned int | 8 | Go `int8` / `uint8` |
-| `i16` / `u16` | signed/unsigned int | 16 | Go `int16` / `uint16` |
-| `i32` / `u32` | signed/unsigned int | 32 | Go `int32` / `uint32` |
+| `i4`  | signed int   | 4 bits  | `int`, −8 … 7 (masked byte) |
+| `u4`  | unsigned int | 4 bits  | `int`, 0 … 15 (masked byte) |
+| `i8` / `u8`   | signed/unsigned int | 8 | `int`, −128 … 127 / 0 … 255 |
+| `i16` / `u16` | signed/unsigned int | 16 | `int` |
+| `i32` / `u32` | signed/unsigned int | 32 | `int` |
 | `f8`  | float | 8 | OCP E4M3 (only variant; NaN at `0x7F`, max finite 448) |
-| `f16` | float | 16 | IEEE 754 binary16 |
-| `f32` | float | 32 | Go `float32` |
-| `f64` | float | 64 | Go `float64` |
-| `str` | UTF-8 string | var | length-prefixed, max 512 KiB |
-| `bool`| boolean | 1 bit | encoded as `u8` 0/1 on the wire |
+| `f16` | float | 16 | IEEE 754 binary16 (`struct` `"e"`) |
+| `f32` | float | 32 | `struct` `"f"` |
+| `f64` | float | 64 | `struct` `"d"` |
+| `str` | UTF-8 string | var | `str`, length-prefixed, max 512 KiB |
+| `bool`| boolean | 1 bit | `bool`, encoded as `u8` 0/1 on the wire |
 
 Encoding rules:
 
-- Wire/storage format is **little-endian** for fixed-width numerics.
-- Canonical binary layout: `1 type byte || payload` (see `PROTOCOL.md` §5.1). `Value` implements
-  `encoding.BinaryMarshaler`/`BinaryUnmarshaler`, which gob uses for persistence.
-- `i4`/`u4` are logically 4-bit but stored as a masked byte in v1 (see §15).
-- `f16` and `f8` are implemented in `internal/value/codec.go` (no external dependency).
-- Values are immutable once stored; mutations replace the value and bump the index.
-
-Every stored entry may also carry exactly one **tag**: an opaque, short UTF-8 string used for
-metadata, filtering, and indexing. `tag` is indexed and included in heuristic clustering.
-Entries also carry an **owner** (namespace) so per-client indexes can be rebuilt after restart.
+- Wire/storage format is **little-endian** for fixed-width numerics (`struct` prefix `<`).
+- Canonical binary layout: `1 type byte || payload` (see `PROTOCOL.md` §5.1).
+  `Value.marshal_binary()` / `Value.unmarshal_binary()` implement it; persistence embeds the blob.
+- Python `int` is unbounded, so **every** integer type is range-checked on write and after
+  arithmetic. `i4`/`u4` are logically 4-bit but stored as a masked byte in v1 (see §14).
+- `f16` uses `struct`'s `"e"`; `f8` (E4M3) is implemented in `creek/value/codec.py` (no dependency).
+- Values are immutable once stored (`frozen=True` dataclass); mutations replace the value. Every
+  entry carries an **owner** (namespace) so a shared store can scope keys per client.
 
 ## 7. Command surface (Redis-like)
 
@@ -182,18 +187,17 @@ Case-insensitive command names, whitespace-separated args. Typed values are give
 ### Connection / auth
 | Command | Notes |
 |---|---|
-| `AUTH <token>` | Identify client; selects namespace + index. |
+| `AUTH <token>` | Identify client; selects namespace. |
 | `PING [msg]` / `ECHO msg` | Health check / echo. |
 | `QUIT` | Close connection. |
 
 ### Key–value
 | Command | Notes |
 |---|---|
-| `SET key value [TYPE t] [TAG tag] [EX s\|PX ms] [NX\|XX]` | Upsert. |
-| `GET key` / `MGET key…` | Returns `[type, value, tag]`. |
+| `SET key value [TYPE t] [EX s\|PX ms] [NX\|XX]` | Upsert. |
+| `GET key` / `MGET key…` | Returns `[type, value]`. |
 | `DEL key…` / `EXISTS key…` | Delete / test. |
 | `TYPE key` | Returns type tag or `none`. |
-| `TAG key` / `SETTAG key tag` | Get / set the metadata tag. |
 | `EXPIRE key seconds` / `TTL key` | TTL management. |
 | `KEYS pattern` / `SCAN cursor [MATCH p] [COUNT n]` | Enumeration. |
 | `INCR key [BY n]` / `DECR key [BY n]` | Integer types only; preserves type; range-checked. |
@@ -202,72 +206,34 @@ Case-insensitive command names, whitespace-separated args. Typed values are give
 ### Pub/Sub
 | Command | Notes |
 |---|---|
-| `PUBLISH channel value [TYPE t] [TAG tag] [RETAIN]` | Publish; `RETAIN` persists last value. |
+| `PUBLISH channel value [TYPE t] [RETAIN]` | Publish; `RETAIN` persists last value. |
 | `SUBSCRIBE channel…` / `PSUBSCRIBE pattern…` | Subscribe (literal / glob). |
 | `UNSUBSCRIBE [channel…]` / `PUNSUBSCRIBE [pattern…]` | Unsubscribe. |
 | `PUBSUB CHANNELS\|NUMSUB\|NUMPAT [arg]` | Introspection. |
 
-### Index / admin
+### Admin
 | Command | Notes |
 |---|---|
-| `INDEX TREE [prefix] [DEPTH n]` | Discovered tree for the calling client (JSON). |
-| `INDEX STATS` | Node counts, type/tag histograms, heuristic scores (JSON). |
-| `INDEX FIND <pattern>` | Segment-aware query against the index. |
-| `INDEX REBUILD` | Re-run heuristics from the store (admin only). |
-| `INDEX SEPARATOR [byte]` | Get / override the segment delimiter. |
 | `INFO [section]`, `FLUSHALL`, `COMMAND [COUNT]` | Operational. |
 
 Notes:
-- The command registry is data-driven: `register(name, arity, scope, fn)` in `internal/command`.
+- The command registry is data-driven: write an `async def` handler and call
+  `register(name, handler, min_args=…, max_args=…, scope=…)` in `creek.commands`.
   Add commands there, never with ad-hoc string matching in the transport layer.
 - New commands must be reflected in this table and in `PROTOCOL.md`.
 
-## 8. Indexing heuristics (the heart of Creek)
+## 8. Auth model
 
-**Status: naive placeholder.** This is the *unoptimized* version. `internal/index` keeps a flat
-`map[string]Record` per client and derives everything on demand. There is no incremental trie, no
-maintained histograms, and no real-time learning beyond one cheap delimiter heuristic. The full
-heuristic implementation is preserved in git tag `optimized-baseline` and is intended to replace
-this later (see §15 and §18).
-
-**Goal (deferred):** without user-declared schemas, discover the tree-like structure inside each
-client's keys and use it for fast pattern subscription, enumeration, and queries.
-
-**Per-client scope.** Each identity owns an index keyed by namespace (falling back to ID). The
-store is shared, but every entry records its `Owner`, so indexes are reconstructible via
-`Engine.RebuildIndexes`.
-
-**What exists today:**
-
-- **Delimiter detection.** `DetectSeparator` counts candidate separators (`.`, `:`, `/`, `-`, `_`)
-  across a client's keys and picks the dominant one (requires evidence in ≥2 keys, defaults to `.`).
-  This is the only retained heuristic.
-- **`Find`** is a linear scan using segment-aware `pattern.MatchSegments`.
-- **`Tree`** and **`Stats`** rebuild a tree by scanning and re-splitting every key on each call.
-- Homogeneity (≥90% one type) and wide nodes (>10 000 children) are computed on demand, not
-  maintained incrementally.
-
-**Deferred (tracked in §15):** incremental segment trie, per-node type/tag histograms, chain
-compaction, and the rest of the heuristic signal set. None of this is wired into the write path.
-
-**Lifecycle:** the index is never a source of truth and is rebuilt with `INDEX REBUILD` or
-`Engine.RebuildIndexes`.
-
-**Matching:** `*`/`?` match within a segment; `**`/`>` match zero or more segments (see
-`internal/pattern`).
-
-## 9. Auth model
-
-Auth exists to **recognize the client and select its index/namespace**, not to be a full security
+Auth exists to **recognize the client and select its namespace**, not to be a full security
 boundary in v1.
 
-- `AUTH <token>` resolves a token to `Identity{ID, Namespace, ACL}`.
-- Token store: a JSON file (`--auth-file`, see `internal/auth`), loaded with `auth.LoadFile`.
-  Tokens are compared in constant time.
+- `AUTH <token>` resolves a token to `Identity(id, namespace, acl)`.
+- Token store: a JSON file (`--auth-file`, see `creek.auth`), loaded with `auth.load_file`.
+  Tokens are compared with `hmac.compare_digest` (constant time).
 - When `--auth-file` is omitted, anonymous access is allowed with a full ACL.
 - ACLs are coarse: `read`, `write`, `subscribe`, `admin` (or `all`/`*`).
-- Every command handler receives the resolved identity; the index and store owner are derived from
-  it. Never trust a client-supplied namespace.
+- Every command handler receives the resolved identity; the store owner is derived from it. Never
+  trust a client-supplied namespace.
 
 Auth file schema:
 
@@ -281,127 +247,155 @@ Auth file schema:
 }
 ```
 
-## 10. Transports and framing
+## 9. Transports and framing
 
-- **WebSocket (native):** text frames carrying JSON command envelopes. Responses are
-  `{"ok":true,"result":…}`; streamed pub/sub messages are `{"type":"message",…}`.
-- **TCP:** RESP2 subset (arrays of bulk strings or inline commands); redis-cli compatible for
-  scalar commands.
+- **WebSocket (native):** framing only. Each binary frame carries exactly one RESP2
+  command; the reply is one binary frame. Streamed pub/sub messages are the same 4-element
+  RESP arrays as TCP. Served by the `websockets` library; HTTP requests to `/` are answered
+  from `--web-dir` via the library's `process_request` hook.
+- **TCP:** the same RESP2 subset (arrays of bulk strings or inline commands) as a byte
+  stream; redis-cli compatible for scalar commands. Served by `asyncio.start_server`.
 - **TLS:** intentionally **out of scope**. Run a reverse proxy in front of the TCP listener.
-- All transports funnel into the same `protocol.Command` model; codecs only translate.
-- Backpressure: pub/sub delivery is non-blocking; a subscriber whose buffer is full or whose
-  `Send` fails is dropped rather than blocking the bus.
+- All transports funnel into the same `creek.protocol.Command` model; the transport only
+  handles framing, never command semantics.
+- Backpressure: pub/sub delivery is non-blocking; a subscriber whose bounded queue is full or whose
+  `send` fails is dropped rather than blocking the bus.
 - WebSocket read limit: 1 MiB; static files are served from `--web-dir` at `/`.
 
-## 11. Persistence
+## 10. Persistence
 
-- **WAL (write-ahead log):** every mutation (SET/DEL/TAG/EXPIRE/FLUSH and `PUBLISH … RETAIN`) is
-  appended as a length- and CRC32-prefixed gob record (`internal/persist/wal.go`).
-  `--fsync=always|everysec|no` (default `everysec`).
-- **Snapshot:** periodic full dump (gob, versioned header) written atomically via temp + rename.
-  Triggered by `--snapshot-interval` and once on shutdown.
-- **Recovery:** `Engine.Recover` loads the snapshot then replays the WAL. Expired entries
-  (absolute deadline in the past) are dropped, not resurrected. Indexes are rebuilt from owners.
+- **WAL (write-ahead log):** every mutation (SET/DEL/EXPIRE/FLUSH and `PUBLISH … RETAIN`) is
+  appended as a `u32 length || u32 CRC32 || payload` record (`creek/persist/wal.py`). The payload
+  is UTF-8 JSON describing the mutation, with typed values carried as base64 of the canonical
+  binary blob. `--fsync=always|everysec|no` (default `everysec`).
+- **Snapshot:** periodic full dump (versioned JSON header + entries, values base64) written
+  atomically via temp file → `fsync` → rename, then directory `fsync`. Triggered by
+  `--snapshot-interval` and once on shutdown.
+- **Recovery:** `Engine.recover` loads the snapshot then replays the WAL. Expired entries
+  (absolute deadline in the past) are dropped, not resurrected.
 - Replay of the full WAL after a snapshot is idempotent; the WAL is **not yet compacted/rotated**
-  after a snapshot (see §15).
+  after a snapshot (see §14).
+- Blocking disk work (write + `os.fsync`) runs off the event loop; see §11.
 - Non-retained pub/sub messages are not persisted.
-- On-disk formats are versioned (`persist.SnapshotVersion`, value type byte). Bump the version and
+- On-disk formats are versioned (`persist.SNAPSHOT_VERSION`, value type byte). Bump the version and
   provide a migration/reader for old files.
 
-## 12. Concurrency
+## 11. Concurrency
 
-- Store is a **single map behind one `sync.RWMutex`** — deliberately unoptimized. Lock striping
-  and sharding are future work if the workload needs it.
-- Per-client indexes have their own `RWMutex`; the engine guards the index map with `imu`.
-- Pub/Sub fanout is a linear scan: it copies the target list under a lock, then sends outside it;
-  failed subscribers are pruned. No subscription index yet.
-- Connection writers (TCP/WS) serialize writes with a per-connection mutex because
-  `coder/websocket` permits only one concurrent writer.
-- Run everything under `-race`; a race is a release blocker.
+- **One asyncio event loop owns all state.** The store is a plain `dict` and the pub/sub registry a
+  plain collection — no locks, because the loop serializes access.
+- **Rule: never `await` inside a logical critical section.** A command handler mutates state and
+  computes its reply synchronously, then awaits I/O. Violating this lets another task observe a
+  half-applied mutation.
+- Blocking work is offloaded: the WAL/snapshot writer is a dedicated task consuming an
+  `asyncio.Queue`; `os.fsync` and snapshot serialization run via `asyncio.to_thread`.
+- Pub/Sub fanout is a linear scan over a snapshot of subscribers. Delivery uses
+  `Queue.put_nowait`; on `QueueFull` (or a closed writer) the subscriber is pruned, never blocked on.
+- Per-connection outbound writes are serialized (a per-connection `asyncio.Lock`, or a single
+  writer task) because interleaving writes corrupt framing.
+- No threads except short-lived `to_thread` workers for blocking I/O; they must not touch store
+  state directly.
+- Run everything under `pytest-asyncio`; a flaky/racy test is a release blocker.
 
-## 13. Dependencies
+## 12. Dependencies
 
 Prefer the standard library. Current external dependencies:
 
 | Concern | Package | Status |
 |---|---|---|
-| WebSocket | `github.com/coder/websocket` | adopted |
-| Argon2id token hashing | `golang.org/x/crypto/argon2` | not yet (see §15) |
+| WebSocket transport | `websockets` | required |
+| Testing | `pytest`, `pytest-asyncio` | dev |
+| Lint/format | `ruff` | dev |
+| Type checking | `mypy` | dev |
 
-`f16`/`f8` are implemented in-tree. Do not add an ORM, a web framework, or a logging framework;
-`log/slog` is the logging standard.
+`f16`/`f8` are implemented in-tree (`struct` + custom E4M3). Do not add an ORM, a web framework, or
+a logging framework; stdlib `logging` is the logging standard. `aiohttp`/`uvicorn`/FastAPI are out
+of scope: Creek speaks its own protocol, not HTTP APIs.
 
-## 14. Testing and quality
+## 13. Testing and quality (planned)
 
-- Table-driven unit tests for `value`, `pattern`, `protocol`, `index`, `store`, and `pubsub`.
-- Codec golden/round-trip tests in `internal/protocol` and `internal/value`.
-- Command-level tests in `internal/command` (ACLs, typed values, TTL, pub/sub, index, recovery).
-- Integration tests in `internal/server` start WS + TCP listeners on ephemeral ports
-  (`Server.Listen` binds, `Server.Serve` runs, `Server.Ready` signals).
+- Table-driven (parametrized) unit tests for `value`, `pattern`, `protocol`, `store`, and `pubsub`.
+- Codec golden/round-trip tests in `tests/test_protocol.py` and `tests/test_value.py`.
+- Command-level tests in `tests/test_commands.py` (ACLs, typed values, TTL, pub/sub, recovery).
+- Integration tests in `tests/test_server.py` start WS + TCP listeners on ephemeral ports.
 - Persistence tests: WAL round-trip, truncated-tail tolerance, reset, snapshot round-trip.
 - **Browser load and performance tests** live in `web/` and are served by the WS listener:
   - `web/index.html` — landing page.
   - `web/loadtest.html` — many concurrent WS clients, live ops/s chart, latency percentiles.
-  - `web/perf.html` — per-command latency/throughput (SET/GET/PUBLISH/INDEX), bar chart.
+  - `web/perf.html` — per-command latency/throughput (SET/GET/PUBLISH), bar chart.
   - `web/bench.js` — dependency-free helpers (client, percentiles, canvas charts).
   These pages must stay dependency-free (no CDNs) so they work offline.
-- Required checks before merge: `gofmt -l .` clean, `go vet ./...`, `go build ./...`,
-  `go test -race ./...`.
+- Required checks before merge: `ruff format --check .` clean, `ruff check .`, `mypy src`, and
+  `pytest -q` all green.
 
-## 15. Open questions (DECISION PENDING)
+## 14. Open questions (DECISION PENDING)
 
-1. **Real-time auto-optimization (deferred)** — the incremental trie + heuristics live in git tag
-   `optimized-baseline`; restore and wire into the write path only after measuring.
-2. **Store lock striping / sharding** — the store is a single mutex-guarded map today.
-3. **Nibble packing** for `i4`/`u4` — currently byte-masked; pack two per byte?
-4. **`f8` variants** — E4M3 only today; add E5M2?
-5. **Chain compaction** — part of the deferred trie work.
-6. **WAL compaction/rotation** — snapshots do not truncate the WAL; add prefix truncation.
-7. **Heuristic thresholds** — 90% homogeneity / 10 000 wide-node are constants in `internal/index`;
-   make configurable when the optimized index returns?
-8. **Argon2id** — token file currently stores plaintext tokens; hash at rest.
-9. **Multi-tag** — one tag per entry today; support a tag set?
-10. **Anonymous default** — currently allowed when no `--auth-file` is given.
-11. **Go client library** (`pkg/client`) — not yet implemented.
-12. **Clustering** — explicitly out of scope for v1.
+1. **WebSocket library** — `websockets` chosen (asyncio-native, HTTP hooks for static files).
+   Revisit if a stdlib-only server becomes a hard requirement.
+2. **Nibble packing** for `i4`/`u4` — the design byte-masks them; pack two per byte?
+3. **`f8` variants** — E4M3 is the only planned variant; add E5M2?
+4. **WAL compaction/rotation** — snapshots do not truncate the WAL; add prefix truncation.
+5. **Token hashing** — plaintext tokens at rest. Prefer stdlib `hashlib.scrypt` (no dependency) or
+   Argon2id via `argon2-cffi`?
+6. **Anonymous default** — allowed when no `--auth-file` is given.
+7. **Python client library** (`creek-client`) — not yet implemented.
+8. **Clustering** — explicitly out of scope for v1.
+9. **Streaming parser re-parse** — the TCP reader re-parses its buffer from the start after each
+   read (simplest correct approach). Add a cursor if very large commands become a real workload.
 
-## 16. Coding conventions
+## 15. Coding conventions
 
-- Go 1.26+. Format with `gofmt`; imports grouped stdlib / external / internal.
-- Errors: wrap with `%w`, return early, no panics in library code.
-- Exported types and funcs have doc comments starting with the name.
-- Contexts flow through I/O and long operations; never store a `context.Context` in a struct.
-- Logging via `log/slog` with structured fields; no `fmt.Println` outside `cmd/`.
-- Keep packages cohesive and dependency-acyclic: `command` may import `store`/`index`/`pubsub`/
-  `persist`/`protocol`, but those must not import `command` or `server`.
-- No global mutable state outside the command registry created at init.
+- **Python 3.12+**. Format and lint with `ruff` (line length 100, double quotes). Type-annotate all
+  public functions; `mypy` must pass on `src`.
+- Use `from __future__ import annotations` for forward references in typing.
+- Errors: a small exception hierarchy in `creek/errors.py` (`CreekError` → `CommandError`,
+  `ProtocolError`). Never use bare `except`; never `sys.exit` in library code.
+- Public modules, classes, and functions have docstrings. Command handlers are small and pure where
+  possible.
+- `asyncio` throughout: all I/O is `async`; never call blocking APIs on the loop (offload with
+  `asyncio.to_thread`). Never `await` in a state-mutating critical section (§11).
+- Logging via stdlib `logging` with structured fields (`logger.info("msg", extra={...})`); no
+  `print` outside `creek/cli.py`.
+- Keep modules cohesive and dependency-acyclic: `creek.commands` may import `creek.store`,
+  `creek.pubsub`, `creek.persist`, `creek.protocol`, and `creek.value`, but those must not import
+  `creek.commands` or `creek.server`. Prefer flat modules over packages; split only when a file
+  outgrows a few hundred lines.
+- No global mutable state outside the command registry built at import time.
+- Data carriers are `@dataclass(frozen=True, slots=True)` (e.g. `Value`, `Command`, `Identity`).
 
-## 17. Glossary
+## 16. Glossary
 
 | Term | Meaning |
 |---|---|
-| **Creek** | This project: typed, indexed, in-memory KV + pub/sub. |
-| **Client identity** | The authenticated principal that owns a namespace and an index. |
-| **Index** | Per-client naive record set; tree/statistics derived on demand. |
-| **Tag** | Single optional metadata string attached to an entry. |
-| **Owner** | Namespace recorded on an entry so indexes can be rebuilt. |
-| **Segment** | One component of a key after splitting on the detected delimiter. |
+| **Creek** | This project: typed, in-memory KV + pub/sub. |
+| **Client identity** | The authenticated principal that owns a namespace. |
+| **Owner** | Namespace recorded on an entry so a shared store can scope keys per client. |
 | **Retained message** | A published value stored as the channel's last value and persisted. |
 | **WAL** | Write-ahead log used for crash recovery. |
+| **Critical section** | A synchronous block that mutates shared state; must not contain `await`. |
 
-## 18. Roadmap
+## 17. Roadmap
 
-- **M0 — Skeleton:** module, flags, listeners, command registry. ✅
-- **M1 — Value + store:** all primitive types, tags, TTL, simple single-map store, tests. ✅
-- **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained. ✅
-- **M3 — Index (placeholder):** flat record set, delimiter detection, `INDEX TREE`/`STATS`/`FIND`
-  derived on demand. ✅ *(optimized trie deferred)*
-- **M4 — Persistence:** WAL + snapshot + recovery tests. ✅ (WAL compaction pending)
-- **M5 — Auth:** token file, per-client namespaces, coarse ACLs. ✅ (Argon2id pending)
-- **M6 — Hardening:** browser load/perf pages ✅; fuzz tests, Go client, docs pending.
-- **M7 — Real-time auto-optimization (deferred):** restore the incremental trie + heuristics from
-  git tag `optimized-baseline`, wire it into the write path, and add lock striping to the store.
-  Measure first; only then optimize.
+- **M0 — Skeleton:** package, `pyproject.toml`, flags, asyncio TCP + WS listeners, command
+  registry. *(implemented)*
+- **M1 — Value + store:** all primitive types, TTL, simple dict store, tests.
+- **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
+- **M3 — Persistence:** WAL + snapshot + recovery tests. (WAL compaction pending)
+- **M4 — Auth:** token file, per-client namespaces, coarse ACLs. (token hashing pending)
+- **M5 — Hardening:** browser load/perf pages; fuzz tests, Python client pending.
+
+## 18. Decision log
+
+Notable decisions future work must respect (newest last).
+
+- **2026-10-06 — Async Python.** Creek pivoted from Go to asyncio Python. See §1–§15.
+- **2026-10-06 — One RESP2 wire protocol.** WebSocket carries the same RESP2 bytes as TCP;
+  WebSocket is framing only (one command per binary frame). There is no JSON codec. See §9 and
+  `PROTOCOL.md` §3.
+- **2026-10-06 — Flat module layout.** An earlier package-per-layer layout (`protocol/`,
+  `command/`, `server/`) was collapsed into single modules (`protocol.py`, `commands.py`,
+  `server.py`): the indirection cost more than it explained. The RESP parser is a pure function
+  over bytes, shared by both transports. See §5 and §15; the TCP re-parse trade-off is §14.9.
 
 ---
 

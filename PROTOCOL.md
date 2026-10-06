@@ -1,18 +1,22 @@
 # Creek Protocol
 
-This document describes the wire protocols Creek speaks. There is **one command
-model** and **two codecs**:
+> **Status: specification.** This defines the wire protocol Creek speaks. The M0 skeleton
+> implements the framing and a handful of commands over both transports; the rest is planned
+> (see `AGENTS.md` §17).
 
-| Transport | Codec | Native? |
+There is **one command model** and **one codec** (a RESP2 subset). It is carried by
+two transports:
+
+| Transport | Framing | Native? |
 |---|---|---|
-| WebSocket (`/ws`) | JSON envelope | **Yes** |
-| TCP | RESP (Redis-style) | Compatibility |
+| WebSocket (`/ws`) | one RESP2 command per binary frame | **Yes** |
+| TCP | RESP2 byte stream | Compatibility |
 | TLS | *out of scope* | Terminate at a reverse proxy |
 
-Both codecs map onto the same `protocol.Command` / `protocol.Reply` types, so
-every command behaves identically regardless of transport. TLS is deliberately
-not implemented; put a reverse proxy (nginx, Caddy, Envoy, …) in front of the
-TCP listener and terminate TLS there.
+The transports only differ in framing. The bytes on the wire are identical, and
+every command behaves the same regardless of transport. TLS is deliberately not
+implemented; put a reverse proxy (nginx, Caddy, Envoy, …) in front of the TCP
+listener and terminate TLS there.
 
 ---
 
@@ -20,8 +24,8 @@ TCP listener and terminate TLS there.
 
 A command is a name plus a list of string arguments:
 
-```
-Command{ Name: "SET", Args: ["sensor.r1.temp", "21.5", "TYPE", "f32"] }
+```python
+Command(name="SET", args=("sensor.r1.temp", "21.5", "TYPE", "f32"))
 ```
 
 - Command names are case-insensitive and normalized to upper case.
@@ -33,63 +37,80 @@ Command{ Name: "SET", Args: ["sensor.r1.temp", "21.5", "TYPE", "f32"] }
 
 Replies are one of six kinds, mirroring RESP2:
 
-| Kind | RESP form | JSON form |
-|---|---|---|
-| Simple string | `+OK\r\n` | `"OK"` |
-| Error | `-ERR …\r\n` | `{"ok":false,"error":"ERR …"}` |
-| Integer | `:42\r\n` | `42` |
-| Bulk string | `$5\r\nhello\r\n` | `"hello"` |
-| Null | `$-1\r\n` | `null` |
-| Array | `*N\r\n…` | `[…]` |
-
-Every non-error JSON response is wrapped as `{"ok":true,"result":…}`.
+| Kind | RESP form |
+|---|---|
+| Simple string | `+OK\r\n` |
+| Error | `-ERR …\r\n` |
+| Integer | `:42\r\n` |
+| Bulk string | `$5\r\nhello\r\n` |
+| Null | `$-1\r\n` |
+| Array | `*N\r\n…` |
 
 ---
 
-## 3. WebSocket codec (native)
+## 3. WebSocket transport (native)
 
-Connect to `ws://<host>:7100/ws`. Messages are UTF-8 text frames containing a
-JSON object.
+Connect to `ws://<host>:7100/ws`. WebSocket is used **only as framing**: each
+message is a **binary frame** carrying exactly one RESP2 command, and the reply
+is sent back as a single binary frame carrying the RESP2 reply. There is no JSON
+layer; a JSON blob is not a valid command and is rejected as an unknown command.
 
 ### 3.1 Request
 
-```json
-{ "cmd": "SET", "args": ["sensor.r1.temp", "21.5", "TYPE", "f32", "TAG", "floor1"] }
+One command per frame, in either RESP form (see §4): an array of bulk strings
+
+```
+*3\r\n$3\r\nSET\r\n$14\r\nsensor.r1.temp\r\n$4\r\n21.5\r\n
 ```
 
-- `cmd` (required) — command name. `command` is accepted as an alias.
-- `args` (optional) — array of values. Strings, numbers, and booleans are all
-  accepted; numbers are stringified (`21.5` → `"21.5"`, `42` → `"42"`).
+or an inline command
+
+```
+PING\r\n
+SET sensor.r1.temp 21.5 TYPE f32\r\n
+```
+
+A frame must contain exactly one command; trailing bytes are a protocol error.
 
 ### 3.2 Response
 
-```json
-{ "ok": true, "result": ["f32", "21.5", "floor1"] }
-{ "ok": false, "error": "ERR unknown command 'FOO'" }
-```
+One reply per frame, using standard RESP2 framing:
 
-Arrays nest naturally; `null` results are `{"ok":true,"result":null}`.
+```
++OK\r\n
+:1\r\n
+$-1\r\n
+*2\r\n$3\r\nf32\r\n$4\r\n21.5\r\n
+```
 
 ### 3.3 Streaming pub/sub messages
 
 After `SUBSCRIBE`/`PSUBSCRIBE`, delivered messages arrive as their own frames,
-distinct from command responses:
+identical to the TCP form: an array of four bulk strings.
 
-```json
-{ "type": "message", "channel": "sensor.r1.temp", "vtype": "f32",
-  "value": "21.5", "tag": "floor1" }
+```
+*4
+$7  message
+$14 sensor.r1.temp
+$3  f32
+$4  21.5
 ```
 
-The `type` field is `"message"`; command responses never carry a `type` field.
-Clients should route frames with `type === "message"` to their subscription
-handler and everything else to the pending command response.
+(shown expanded; on the wire it is `*4\r\n$7\r\nmessage\r\n…`). Command replies
+and delivered messages are distinguished by the first bulk string: `message` for
+a delivery, anything else for a reply.
+
+### 3.4 Static files
+
+The WebSocket listener also answers plain HTTP requests from `--web-dir` at `/`;
+only the `/ws` path upgrades to a WebSocket.
 
 ---
 
-## 4. RESP codec (TCP)
+## 4. RESP2 codec (shared)
 
-The TCP listener speaks a RESP2-compatible subset so `redis-cli` and existing
-Redis clients can talk to it. Two request forms are accepted.
+Both transports speak a RESP2-compatible subset so `redis-cli` and existing
+Redis clients can talk to the TCP listener. Two request forms are accepted.
 
 ### 4.1 Array of bulk strings (preferred)
 
@@ -114,23 +135,22 @@ Standard RESP2 framing, e.g.:
 +OK\r\n
 :1\r\n
 $-1\r\n
-*3\r\n$3\r\nf32\r\n$4\r\n21.5\r\n$6\r\nfloor1\r\n
+*2\r\n$3\r\nf32\r\n$4\r\n21.5\r\n
 ```
 
 ### 4.4 Streaming pub/sub messages
 
-A delivered message is an array of five bulk strings:
+A delivered message is an array of four bulk strings:
 
 ```
-*5
+*4
 $7  message
 $14 sensor.r1.temp
 $3  f32
 $4  21.5
-$6  floor1
 ```
 
-(shown expanded; on the wire it is `*5\r\n$7\r\nmessage\r\n…`).
+(shown expanded; on the wire it is `*4\r\n$7\r\nmessage\r\n…`).
 
 ---
 
@@ -152,8 +172,8 @@ Creek values are primitives with an explicit type tag. Non-string values
 | `str` | variable | UTF-8, max 512 KiB |
 | `bool` | 1 bit | `true` / `false` |
 
-On the wire (RESP and JSON) values are transmitted as **text**. The binary
-encoding below is used only for storage and persistence.
+On the wire values are transmitted as **text**. The binary encoding below is used
+only for storage and persistence.
 
 ### 5.1 Binary encoding (storage / WAL)
 
@@ -170,6 +190,10 @@ encoding below is used only for storage and persistence.
 
 `f8` is OCP E4M3: 1 sign, 4 exponent (bias 7), 3 mantissa. Exponent field 15
 with mantissa 7 is NaN; overflow saturates to the largest finite value (448).
+
+In the Python implementation, fixed-width payloads are packed with `struct`
+(little-endian prefix `<`); `f16` uses the `"e"` format. Python integers are
+unbounded, so integer types are range-checked on write and after arithmetic.
 
 ---
 
@@ -188,14 +212,12 @@ with mantissa 7 is NaN; overflow saturates to the largest finite value (448).
 
 | Command | Args | Reply |
 |---|---|---|
-| `SET key value [TYPE t] [TAG tag] [EX s\|PX ms] [NX\|XX]` | | `OK` / `null` |
-| `GET key` | | `[type, value, tag]` / `null` |
+| `SET key value [TYPE t] [EX s\|PX ms] [NX\|XX]` | | `OK` / `null` |
+| `GET key` | | `[type, value]` / `null` |
 | `MGET key…` | | array of entries / `null` |
 | `DEL key…` | | integer (deleted count) |
 | `EXISTS key…` | | integer (existing count) |
 | `TYPE key` | | type tag or `none` |
-| `TAG key` | | tag / `null` |
-| `SETTAG key tag` | | `OK` / `ERR no such key` |
 | `EXPIRE key seconds` | | `1` / `0` |
 | `TTL key` | | seconds, `-1` (no TTL), `-2` (missing) |
 | `KEYS pattern` | | array of keys |
@@ -207,7 +229,7 @@ with mantissa 7 is NaN; overflow saturates to the largest finite value (448).
 
 | Command | Args | Reply |
 |---|---|---|
-| `PUBLISH channel value [TYPE t] [TAG tag] [RETAIN]` | | integer (receivers) |
+| `PUBLISH channel value [TYPE t] [RETAIN]` | | integer (receivers) |
 | `SUBSCRIBE channel…` | | array of `[subscribe, channel, count]` |
 | `PSUBSCRIBE pattern…` | | array of `[psubscribe, pattern, count]` |
 | `UNSUBSCRIBE [channel…]` | | integer |
@@ -218,39 +240,6 @@ with mantissa 7 is NaN; overflow saturates to the largest finite value (448).
 
 `RETAIN` stores the message as the channel's last value and persists it; new
 matching subscribers receive it immediately after subscribing.
-
-### Index
-
-> Note: the index is currently a **naive placeholder**. `TREE`/`STATS` rebuild the tree by
-> scanning every key on each call, and `FIND` is a linear scan. The response shapes below are
-> stable; the implementation is expected to become an incremental trie later.
-
-| Command | Args | Reply |
-|---|---|---|
-| `INDEX TREE [prefix] [DEPTH n]` | | JSON `NodeView` / `null` |
-| `INDEX STATS` | | JSON `Stats` |
-| `INDEX FIND pattern` | | array of keys |
-| `INDEX REBUILD` | | `OK` (admin only) |
-| `INDEX SEPARATOR [byte]` | | current or `OK` |
-
-`NodeView`:
-
-```json
-{
-  "segment": "sensor", "count": 3, "terminal": 0,
-  "types": {"f32": 3}, "tags": {"floor1": 2},
-  "homogeneous": "f32", "wide": false,
-  "children": [ { "segment": "room1", "count": 2, "terminal": 0, "children": [] } ]
-}
-```
-
-`Stats`:
-
-```json
-{ "keys": 3, "nodes": 6, "separator": ".", "max_depth": 3,
-  "homogeneous_nodes": 4, "wide_nodes": 0,
-  "types": {"f32": 3}, "tags": {"floor1": 2} }
-```
 
 ### Admin
 
@@ -264,16 +253,11 @@ matching subscribers receive it immediately after subscribing.
 
 ## 7. Patterns
 
-Two glob dialects are used:
+Glob patterns are used by `KEYS`, `PUBSUB`, and `PSUBSCRIBE`:
 
-- **Channel/key globs** (`KEYS`, `PUBSUB`, `PSUBSCRIBE`, `INDEX FIND`):
-  `*` matches any run of characters including delimiters; `?` matches one
+- `*` matches any run of characters including delimiters; `?` matches one
   character. This matches Redis semantics, so `news.*` also matches
   `news.tech.redis`.
-- **Segment patterns** (`INDEX FIND`): `*` and `?` operate within one segment
-  (split on the detected separator), while `**` or `>` matches zero or more
-  whole segments. `sensor.*.temp` matches `sensor.room1.temp` but not
-  `sensor.room1.sub.temp`; `sensor.>` matches both.
 
 ## 8. Errors
 
@@ -283,8 +267,8 @@ violations return `ERR wrong number of arguments for '<cmd>'`.
 
 ## 9. Versioning
 
-- The WebSocket envelope is currently unversioned. A future `HELLO` handshake
-  will negotiate versions.
-- The RESP subset tracks RESP2 framing.
-- Storage formats are versioned separately (`persist.SnapshotVersion`, and the
-  value codec's type byte); see `AGENTS.md` §11.
+- The protocol is currently unversioned. A future `HELLO` handshake will
+  negotiate versions.
+- Both transports track RESP2 framing; WebSocket adds message framing only.
+- Storage formats will be versioned separately (`persist.SNAPSHOT_VERSION`, and the
+  value codec's type byte); see `AGENTS.md` §10.
