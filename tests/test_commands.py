@@ -18,6 +18,10 @@ async def test_ping_echoes_argument() -> None:
     assert await execute(Command("PING", ("hi",)), Context()) == "hi"
 
 
+async def test_hello() -> None:
+    assert await execute(Command("HELLO"), Context()) == SimpleString("HI")
+
+
 async def test_unknown_command() -> None:
     with pytest.raises(CommandError) as info:
         await execute(Command("NOPE"), Context())

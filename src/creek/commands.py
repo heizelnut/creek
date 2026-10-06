@@ -91,6 +91,10 @@ async def cmd_quit(command: Command, context: Context) -> Reply:
     return SimpleString("OK")
 
 
+async def cmd_hello(command: Command, context: Context) -> Reply:
+    return SimpleString("HI")
+
+
 async def cmd_auth(command: Command, context: Context) -> Reply:
     if context.authenticator is None:
         raise CommandError("AUTH is not enabled")
@@ -127,3 +131,4 @@ register("QUIT", cmd_quit, scope="public")
 register("AUTH", cmd_auth, min_args=1, max_args=1, scope="public")
 register("COMMAND", cmd_command, max_args=2, scope="admin")
 register("INFO", cmd_info, max_args=1, scope="admin")
+register("HELLO", cmd_hello, max_args=0, scope="public")
