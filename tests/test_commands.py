@@ -147,6 +147,24 @@ async def test_del_exists_dbsize(context) -> None:
     assert await execute(Command("DBSIZE", ()), context) == 0
 
 
+async def test_flushall(context) -> None:
+    await execute(Command("SET", ("a", "1")), context)
+    await execute(Command("SET", ("b", "1")), context)
+    assert await execute(Command("FLUSHALL", ()), context) == SimpleString("OK")
+    assert await execute(Command("DBSIZE", ()), context) == 0
+
+
+async def test_flushall_is_scoped_to_namespace() -> None:
+    store = Store()
+    alice = Context(identity=Identity("a", "ns-a", frozenset({"all"})), store=store)
+    bob = Context(identity=Identity("b", "ns-b", frozenset({"all"})), store=store)
+    await execute(Command("SET", ("k", "alice")), alice)
+    await execute(Command("SET", ("k", "bob")), bob)
+    await execute(Command("FLUSHALL", ()), alice)
+    assert await execute(Command("GET", ("k",)), alice) is None
+    assert await execute(Command("GET", ("k",)), bob) == ["str", "bob"]
+
+
 async def test_type(context) -> None:
     assert await execute(Command("TYPE", ("missing",)), context) == SimpleString("none")
     await execute(Command("SET", ("k", "1", "TYPE", "u4")), context)

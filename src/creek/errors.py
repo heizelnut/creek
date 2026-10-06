@@ -18,6 +18,10 @@ class InvalidValue(CreekError):
     """A value could not be parsed, encoded, or is out of range."""
 
 
+class PersistError(CreekError):
+    """A WAL or snapshot file is missing, corrupt, or an unsupported version."""
+
+
 class CommandError(CreekError):
     """A command failed; carries a RESP error code such as ``ERR``."""
 

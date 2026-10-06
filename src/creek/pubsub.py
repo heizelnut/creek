@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 
 from creek.pattern import match
+from creek.persist import Journal, RetainedRecord
 from creek.protocol import encode_message
 from creek.value import Value
 
@@ -63,10 +64,11 @@ class Subscriber:
 class Bus:
     """Subscription registry and fanout, scoped by namespace (owner)."""
 
-    def __init__(self) -> None:
+    def __init__(self, journal: Journal | None = None) -> None:
         self._channels: dict[tuple[str, str], set[Subscriber]] = {}
         self._patterns: dict[tuple[str, str], set[Subscriber]] = {}
         self._retained: dict[tuple[str, str], Value] = {}
+        self.journal = journal
 
     def subscribe(self, subscriber: Subscriber, channel: str) -> None:
         """Subscribe ``subscriber`` to a literal channel."""
@@ -119,6 +121,16 @@ class Bus:
     def retain(self, owner: str, channel: str, value: Value) -> None:
         """Store the channel's last value for future subscribers."""
         self._retained[(owner, channel)] = value
+        if self.journal is not None:
+            self.journal.retain(owner, channel, value)
+
+    def restore_retained(self, owner: str, channel: str, value: Value) -> None:
+        """Recover a retained value without journaling."""
+        self._retained[(owner, channel)] = value
+
+    def retained_entries(self) -> list[RetainedRecord]:
+        """All retained values for snapshotting."""
+        return [(owner, channel, value) for (owner, channel), value in self._retained.items()]
 
     def retained(self, owner: str, channel: str) -> Value | None:
         """The retained value for a channel, if any."""

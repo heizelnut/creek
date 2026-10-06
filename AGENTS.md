@@ -153,7 +153,7 @@ creek/
 │   ├── store.py        keys + TTL (M1b)
 │   ├── pattern.py      glob matching (M1b)
 │   ├── pubsub.py       subscriptions + fanout (M2)
-│   └── persist.py      (M3) WAL + snapshots
+│   └── persist.py      WAL + snapshots (M3)
 ├── tests/          test_protocol.py test_commands.py test_auth.py
 │                   test_cli.py test_server.py test_value.py ...
 └── web/            index.html loadtest.html perf.html bench.js
@@ -352,6 +352,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 2. **Nibble packing** for `i4`/`u4` — the design byte-masks them; pack two per byte?
 3. **`f8` variants** — E4M3 is the only planned variant; add E5M2?
 4. **WAL compaction/rotation** — snapshots do not truncate the WAL; add prefix truncation.
+   Until then, a restart replays the whole WAL after the snapshot (idempotent).
 5. **Token hashing** — plaintext tokens at rest. Prefer stdlib `hashlib.scrypt` (no dependency) or
    Argon2id via `argon2-cffi`?
 6. **Anonymous default** — allowed when no `--auth-file` is given.
@@ -407,7 +408,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
   *(implemented)*
 - **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
   *(implemented)*
-- **M3 — Persistence:** WAL + snapshot + recovery tests. (WAL compaction pending)
+- **M3 — Persistence:** WAL + snapshot + recovery tests. *(implemented; WAL compaction pending)*
 - **M4 — Auth:** token file, per-client namespaces, coarse ACLs. (token hashing pending)
 - **M5 — Hardening:** browser load/perf pages; fuzz tests, Python client pending.
 
@@ -436,6 +437,13 @@ Notable decisions future work must respect (newest last).
   deadlines (`time.time`) so M3 can persist them; expiry is lazy on access. `INCR`/`DECR` create a
   missing key as `i32`, preserve the existing integer type and TTL, and range-check the result.
   `SCAN` uses an integer index into the sorted key list (a simplification; see §14.10).
+- **2026-10-06 — Persistence.** WAL records are ``u32 length || u32 CRC32 || UTF-8 JSON`` with
+  values as base64 of `Value.to_bytes()`; a truncated/corrupt tail is tolerated. Snapshots are a
+  versioned JSON document written atomically (temp → fsync → rename → dir fsync). The `Wal` runs a
+  background writer task (draining an `asyncio.Queue`, `os.fsync` in a thread); `--fsync=always`
+  fsyncs after every record *in the background*, so a command never blocks on disk. The store and
+  bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
+  A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
 - **2026-10-06 — Pub/sub delivery.** Each connection owns one `Subscriber` with a single bounded
   outbound queue; one writer task drains it, so replies and messages never interleave. Replies
   use blocking `send` (backpressure); pub/sub uses `deliver` (drop the subscriber if full). The

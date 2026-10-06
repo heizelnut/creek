@@ -284,6 +284,11 @@ async def cmd_dbsize(command: Command, context: Context) -> Reply:
     return context.store.dbsize(_owner(context))
 
 
+async def cmd_flushall(command: Command, context: Context) -> Reply:
+    context.store.clear(_owner(context))
+    return SimpleString("OK")
+
+
 async def _adjust(command: Command, context: Context, sign: int) -> Reply:
     key = command.args[0]
     amount = 1
@@ -425,6 +430,7 @@ register("TTL", cmd_ttl, min_args=1, max_args=1, scope="read")
 register("KEYS", cmd_keys, min_args=1, max_args=1, scope="read")
 register("SCAN", cmd_scan, min_args=1, max_args=None, scope="read")
 register("DBSIZE", cmd_dbsize, scope="read")
+register("FLUSHALL", cmd_flushall, scope="admin")
 register("INCR", cmd_incr, min_args=1, max_args=3, scope="write")
 register("DECR", cmd_decr, min_args=1, max_args=3, scope="write")
 register("PUBLISH", cmd_publish, min_args=2, max_args=None, scope="subscribe")

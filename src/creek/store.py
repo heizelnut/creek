@@ -1,8 +1,11 @@
-"""In-memory key-value store with TTL and namespace ownership.
+"""In-memory key-value store with TTL, namespace ownership, and a journal.
 
 One plain dict keyed by ``(owner, key)``. ``owner`` is the client namespace
 (``AGENTS.md`` §8), derived from the identity, never from the client. All
 methods are synchronous: the event loop serializes access (``AGENTS.md`` §11).
+
+Every mutation is reported to an optional :class:`creek.persist.Journal` (the
+WAL). Recovery uses :meth:`restore` / :meth:`clear`, which do not journal.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from creek.persist import Journal
 from creek.value import Value
 
 
@@ -22,12 +26,20 @@ class Entry:
     expires_at: float | None
 
 
+EntryRecord = tuple[str, str, Value, float | None]
+
+
 class Store:
     """A single dict of ``(owner, key) -> Entry`` with lazy expiry."""
 
-    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.time,
+        journal: Journal | None = None,
+    ) -> None:
         self._data: dict[tuple[str, str], Entry] = {}
         self._clock = clock
+        self.journal = journal
 
     def get(self, owner: str, key: str) -> Value | None:
         """Return the live value, or ``None`` if absent or expired."""
@@ -53,7 +65,9 @@ class Store:
             return False
         if xx and not exists:
             return False
-        self._data[(owner, key)] = Entry(value, self._deadline(ttl))
+        deadline = self._deadline(ttl)
+        self._data[(owner, key)] = Entry(value, deadline)
+        self._log_set(owner, key, value, deadline)
         return True
 
     def update(self, owner: str, key: str, value: Value) -> None:
@@ -61,12 +75,14 @@ class Store:
         entry = self._live(owner, key)
         deadline = entry.expires_at if entry is not None else None
         self._data[(owner, key)] = Entry(value, deadline)
+        self._log_set(owner, key, value, deadline)
 
     def delete(self, owner: str, key: str) -> bool:
         """Delete a key; returns whether it existed."""
         if self._live(owner, key) is None:
             return False
         del self._data[(owner, key)]
+        self._log_delete(owner, key)
         return True
 
     def exists(self, owner: str, key: str) -> bool:
@@ -80,8 +96,11 @@ class Store:
             return False
         if ttl <= 0:
             del self._data[(owner, key)]
+            self._log_delete(owner, key)
         else:
-            self._data[(owner, key)] = Entry(entry.value, self._clock() + ttl)
+            deadline = self._clock() + ttl
+            self._data[(owner, key)] = Entry(entry.value, deadline)
+            self._log_set(owner, key, entry.value, deadline)
         return True
 
     def ttl(self, owner: str, key: str) -> int:
@@ -109,6 +128,30 @@ class Store:
         """Number of live keys for ``owner``."""
         return len(self.keys(owner))
 
+    def clear(self, owner: str) -> None:
+        """Delete every key for ``owner`` (FLUSHALL)."""
+        for key in [item for item in self._data if item[0] == owner]:
+            del self._data[key]
+        if self.journal is not None:
+            self.journal.flush(owner)
+
+    def entries(self) -> list[EntryRecord]:
+        """Live entries for snapshotting: ``(owner, key, value, expires_at)``."""
+        now = self._clock()
+        result: list[EntryRecord] = []
+        for (owner, key), entry in list(self._data.items()):
+            if entry.expires_at is not None and entry.expires_at <= now:
+                del self._data[(owner, key)]
+                continue
+            result.append((owner, key, entry.value, entry.expires_at))
+        return result
+
+    def restore(self, owner: str, key: str, value: Value, expires_at: float | None) -> None:
+        """Recover an entry with an absolute deadline; skips already-expired ones."""
+        if expires_at is not None and expires_at <= self._clock():
+            return
+        self._data[(owner, key)] = Entry(value, expires_at)
+
     def _live(self, owner: str, key: str) -> Entry | None:
         entry = self._data.get((owner, key))
         if entry is None:
@@ -121,5 +164,13 @@ class Store:
     def _deadline(self, ttl: float | None) -> float | None:
         return None if ttl is None else self._clock() + ttl
 
+    def _log_set(self, owner: str, key: str, value: Value, expires_at: float | None) -> None:
+        if self.journal is not None:
+            self.journal.set(owner, key, value, expires_at)
 
-__all__ = ["Entry", "Store"]
+    def _log_delete(self, owner: str, key: str) -> None:
+        if self.journal is not None:
+            self.journal.delete(owner, key)
+
+
+__all__ = ["Entry", "EntryRecord", "Store"]
