@@ -56,6 +56,7 @@ class Config:
     fsync: str = "everysec"
     snapshot_interval: float = 300.0
     replicaof: tuple[str, int, str | None] | None = None
+    auto_failover_after: float | None = None
     cluster: Cluster | None = None
 
 
@@ -77,7 +78,11 @@ class Server:
         self.config = config
         self.cluster = config.cluster
         self.authenticator = Authenticator.from_file(config.auth_file) if config.auth_file else None
-        self.replication = Replication(apply_record=self._apply, load_snapshot=self._load_snapshot)
+        self.replication = Replication(
+            apply_record=self._apply,
+            load_snapshot=self._load_snapshot,
+            auto_failover_after=config.auto_failover_after,
+        )
         self.store = Store()
         self.bus = Bus()
         self.tenants = TenantRegistry()

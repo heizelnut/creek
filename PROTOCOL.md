@@ -297,6 +297,23 @@ counters). Admin-scoped commands are written to the server's audit log.
 Keys and channels are limited to 1024 bytes; longer values return `ERR key too long` or
 `ERR channel too long`.
 
+### Replication / cluster
+
+| Command | Args | Reply |
+|---|---|---|
+| `REPLICAOF host port [token]` | | `OK` |
+| `REPLICAOF NO ONE` | | `OK` (promote to primary) |
+| `ROLE` | | `[role, …]` |
+| `KEYSLOT key` | | integer |
+| `CLUSTER INFO` | | bulk text |
+| `CLUSTER SLOTS` | | array of `[start, end, [ip, port, id]]` |
+| `SYNC` / `REPLICATE offset` | | replication payloads (internal) |
+
+A replica rejects write commands with `READONLY`. In a cluster, a key owned by another node
+returns `MOVED <slot> <addr>`, a multi-key command whose keys span slots returns `CROSSSLOT`, and
+an unassigned slot returns `CLUSTERDOWN`. Replication is pull-based: a replica calls `SYNC` for a
+full snapshot, then `REPLICATE <offset>` for records appended since its offset.
+
 ---
 
 ## 7. Patterns
@@ -309,8 +326,8 @@ Glob patterns are used by `KEYS`, `PUBSUB`, and `PSUBSCRIBE`:
 
 ## 8. Errors
 
-Errors are `ERR …` (or `WRONGPASS`, `NOPERM`, `NOAUTH`, `QUOTA`) and never terminate the
-connection. Unknown commands return `ERR unknown command '<name>'`; arity
+Errors are `ERR …` (or `WRONGPASS`, `NOPERM`, `NOAUTH`, `QUOTA`, `READONLY`, `MOVED`, `CROSSSLOT`,
+`CLUSTERDOWN`) and never terminate the connection. Unknown commands return `ERR unknown command '<name>'`; arity
 violations return `ERR wrong number of arguments for '<cmd>'`.
 
 ## 9. Versioning

@@ -727,6 +727,8 @@ def _replication_report(context: Context) -> str:
         lines.append(f"master_port:{state.master[1]}")
         lines.append(f"offset:{state.offset}")
         lines.append(f"link:{state.link}")
+        if state.down_since is not None:
+            lines.append(f"master_link_down_since:{state.down_since:.3f}")
         if state.last_error is not None:
             lines.append(f"last_error:{state.last_error}")
     return "\r\n".join(lines)

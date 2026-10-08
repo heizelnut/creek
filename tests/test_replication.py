@@ -151,6 +151,45 @@ async def test_promotion_allows_writes() -> None:
         await primary.close()
 
 
+async def test_link_down_is_detected() -> None:
+    replica = Server(_config(replicaof=("127.0.0.1", 1, None)))  # nothing listening
+    await replica.start()
+    try:
+        assert await _wait_until(lambda: replica.replication.state.link == "down")
+        assert replica.replication.state.down_since is not None
+    finally:
+        await replica.close()
+
+
+async def test_auto_failover_promotes() -> None:
+    primary = Server(_config())
+    await primary.start()
+    replica = Server(
+        _config(replicaof=("127.0.0.1", primary.tcp_port, None), auto_failover_after=0.2)
+    )
+    await replica.start()
+    try:
+        assert await _wait_until(lambda: replica.replication.state.link == "up")
+        await primary.close()  # the primary goes away
+        assert await _wait_until(lambda: not replica.replication.state.read_only, timeout=5.0)
+    finally:
+        await replica.close()
+
+
+async def test_no_auto_failover_by_default() -> None:
+    primary = Server(_config())
+    await primary.start()
+    replica = Server(_config(replicaof=("127.0.0.1", primary.tcp_port, None)))
+    await replica.start()
+    try:
+        assert await _wait_until(lambda: replica.replication.state.link == "up")
+        await primary.close()
+        await asyncio.sleep(0.5)
+        assert replica.replication.state.read_only is True
+    finally:
+        await replica.close()
+
+
 async def test_full_resync_replaces_state() -> None:
     primary, replica = await _pair()
     try:

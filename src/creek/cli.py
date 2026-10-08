@@ -42,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replicaof", default=None, help="follow a primary (host:port)")
     parser.add_argument("--replica-token", default=None, help="AUTH token for the primary")
     parser.add_argument("--cluster-config", type=Path, default=None, help="JSON slot topology")
+    parser.add_argument(
+        "--auto-failover-after",
+        type=float,
+        default=None,
+        help="seconds without a primary before a replica promotes itself",
+    )
     parser.add_argument("--log-level", default="info", help="debug|info|warning|error")
     parser.add_argument("--version", action="version", version=f"creek {__version__}")
     return parser
@@ -76,6 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         fsync=args.fsync,
         snapshot_interval=snapshot_interval,
         replicaof=replicaof,
+        auto_failover_after=args.auto_failover_after,
         cluster=cluster,
     )
     with contextlib.suppress(KeyboardInterrupt):

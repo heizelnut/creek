@@ -28,9 +28,10 @@ Core traits:
 
 Creek is *not* (v1 non-goals): a Redis drop-in replacement, a general document store, a SQL
 database, or a full RBAC platform. **v1 is single-node** and namespaces are a scoping mechanism,
-not a hard tenant boundary: multitenancy (**M6**) and clustering (**M7**) are planned future
-milestones (§17), not v1 features. Avoid scope creep in these directions unless this file is
-updated first.
+not a hard tenant boundary. Multitenancy (**M6**) and clustering (**M7**) are implemented as
+opt-in features (§17): v1 stays single-node by default, and clustering is deliberately partial
+(read replicas + static sharding; see M7c). Avoid scope creep in these directions unless this
+file is updated first.
 
 ## 2. How to use this file (agents)
 
@@ -157,7 +158,9 @@ creek/
 │   ├── pattern.py      glob matching (M1b)
 │   ├── pubsub.py       subscriptions + fanout (M2)
 │   ├── persist.py      WAL + snapshots (M3)
-│   ├── tenant.py       tenant registry (M6a)
+│   ├── tenant.py       tenant registry + quotas (M6)
+│   ├── cluster.py      hash slots + topology (M7b)
+│   ├── replication.py  replication log + replicas (M7a/c)
 │   └── client.py       async client library (M5)
 ├── tests/          test_protocol.py test_commands.py test_auth.py
 │                   test_cli.py test_server.py test_value.py
@@ -391,8 +394,8 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 6. **Anonymous default** — allowed when no `--auth-file` is given.
 7. **Python client library** — *resolved*: `creek.client` (async, both transports). A separate
    `creek-client` distribution is still optional.
-8. **Clustering** — v1 is single-node. Planned as **M7** (§17) in phases; treat as exploratory and
-   do not let it shape v1 code.
+8. **Clustering** — v1 is single-node by default; **M7a/M7b** are implemented (§17). Open items:
+   `ASK` redirects during resharding, gossip-based membership, and a stateless proxy.
 9. **Streaming parser re-parse** — the TCP reader re-parses its buffer from the start after each
    read (simplest correct approach). Add a cursor if very large commands become a real workload.
 10. **SCAN cursor** — an index into the sorted key list, not a reverse-binary cursor like Redis;
@@ -405,6 +408,11 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 13. **Multitenancy isolation** — namespaces share one process, store, and WAL. **M6** (§17) defines
     quotas, lifecycle, and optional per-tenant persistence. Decide whether a tenant can be exported
     or moved between nodes (this interacts with M7b sharding).
+14. **Cluster-wide pub/sub** — pub/sub is node-local; a message published on one node does not
+    reach subscribers on another. Routing it across nodes is the hardest part of clustering and is
+    not implemented. See §17 M7c.
+15. **Failover safety** — automatic promotion (`--auto-failover-after`) is best-effort and can
+    split-brain. A consensus-based election (Raft) is not implemented.
 
 ## 15. Coding conventions
 
@@ -459,12 +467,16 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
     limits, no cross-tenant enumeration, audit logging of admin actions. *(implemented)*
 - **M7 — Clustering (multi-phase; exploratory):** v1 is single-node and nothing in it assumes a
   cluster.
-  - **M7a — Read replicas:** one writer, N followers streaming the WAL; `ROLE` / `INFO replication`;
-    clients may read from any node.
-  - **M7b — Sharding:** hash-slot partitioning (e.g. 16384 slots), `CLUSTER` commands, and
-    `MOVED`/`ASK` redirects; a cluster-aware client or a stateless proxy.
-  - **M7c — Failover:** membership and failure detection, leader election (Raft-style), automatic
-    promotion, and cluster-wide pub/sub routing (the hardest part).
+  - **M7a — Read replicas:** pull-based replication; the primary keeps a bounded backlog and
+    serves `SYNC` (snapshot) / `REPLICATE <offset>` (incremental); `REPLICAOF`, `ROLE`,
+    `INFO replication`; replicas reject writes. *(implemented)*
+  - **M7b — Sharding:** Redis-compatible hash slots (16384, `{tag}` tags), a static topology
+    (`--cluster-config`), `KEYSLOT`, `CLUSTER INFO|SLOTS`, and `MOVED`/`CROSSSLOT` redirects;
+    the TCP client follows `MOVED`. No gossip/resharding. *(implemented)*
+  - **M7c — Failover:** failure detection (`master_link_down_since`) and opt-in automatic
+    promotion (`--auto-failover-after`). *(implemented, best-effort)* **Not** consensus-safe: a
+    returning primary can cause split-brain, and there is no leader election. Cluster-wide pub/sub
+    routing is **not implemented** (see §14.14).
 
 ## 18. Decision log
 
@@ -522,6 +534,21 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — Read replicas (M7a).** Replication is **pull-based**: the primary keeps a
+  bounded in-memory backlog (`ReplicationLog`, the journal used by store/bus/tenants, optionally
+  forwarding to the WAL) and serves `SYNC` (full snapshot) and `REPLICATE <offset>` (records since
+  an offset). A replica pulls the snapshot, then polls; if its offset was evicted it does a full
+  resync. Replicas reject writes (`READONLY`). Applied records are journal-free so a replica does
+  not re-journal into its own log. Trade-off: replication lag is one poll interval.
+- **2026-10-06 — Sharding (M7b).** Redis-compatible CRC16 slots (16384, `{tag}` hash tags) and a
+  **static** topology loaded from `--cluster-config`. A command whose key belongs to another node
+  gets `MOVED <slot> <addr>`; multi-key commands spanning slots get `CROSSSLOT`; unassigned slots
+  get `CLUSTERDOWN`. The TCP client follows `MOVED`. There is no gossip, resharding, or `ASK`.
+- **2026-10-06 — Failover (M7c).** Failure detection is exposed as `master_link_down_since` in
+  `INFO replication`; `REPLICAOF NO ONE` promotes manually; `--auto-failover-after <seconds>`
+  promotes automatically after a sustained outage. This is **best-effort, not consensus-safe** —
+  no leader election, and a returning primary can cause split-brain. Cluster-wide pub/sub is not
+  implemented. See §14.14/§14.15.
 - **2026-10-06 — Tenant hardening (M6c).** Per-tenant counters (`commands`, `quota_rejections`,
   `connections_opened`) surface in `TENANT INFO`, and `INFO tenant` prints a one-line report per
   tenant. Keys and channels are capped at 1024 bytes. Admin-scoped commands are logged to the

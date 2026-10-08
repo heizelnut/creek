@@ -67,6 +67,22 @@ async def main():
 asyncio.run(main())
 ```
 
+## Replication and sharding
+
+Read replicas (pull-based) and static hash-slot sharding are opt-in:
+
+```bash
+# primary
+uv run creek --tcp-addr :7101
+# replica
+uv run creek --tcp-addr :7102 --replicaof 127.0.0.1:7101
+# a sharded node (JSON topology; see AGENTS.md §17 M7b)
+uv run creek --tcp-addr :7101 --cluster-config cluster.json
+```
+
+Replicas serve reads and reject writes with `READONLY`. In a cluster, a key owned by another node
+returns `MOVED <slot> <addr>`; the TCP client follows it automatically.
+
 ## Browser pages
 
 With `--web-dir ./web`, the WebSocket listener also serves dependency-free load and performance

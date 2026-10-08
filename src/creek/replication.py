@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import logging
+import time
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -36,6 +38,8 @@ from creek.value import Value
 
 ApplyRecord = Callable[[dict[str, Any]], None]
 LoadSnapshot = Callable[[Snapshot], None]
+
+log = logging.getLogger("creek.replication")
 
 
 class ReplicationLog:
@@ -104,6 +108,7 @@ class ReplicationState:
         self.offset = 0
         self.link = "up"
         self.last_error: str | None = None
+        self.down_since: float | None = None
 
     @property
     def read_only(self) -> bool:
@@ -121,12 +126,14 @@ class Replication:
         *,
         capacity: int = 10_000,
         interval: float = 0.1,
+        auto_failover_after: float | None = None,
     ) -> None:
         self.log = ReplicationLog(capacity)
         self.state = ReplicationState()
         self._apply_record: ApplyRecord = apply_record or (lambda record: None)
         self._load_snapshot: LoadSnapshot = load_snapshot or (lambda snapshot: None)
         self._interval = interval
+        self._auto_failover_after = auto_failover_after
         self._token: str | None = None
         self._task: asyncio.Task[None] | None = None
 
@@ -144,6 +151,7 @@ class Replication:
         await self.stop()
         self.state.master = None
         self.state.link = "up"
+        self.state.down_since = None
 
     async def stop(self) -> None:
         """Cancel the replica task, if any."""
@@ -163,7 +171,23 @@ class Replication:
             except Exception as exc:
                 self.state.link = "down"
                 self.state.last_error = str(exc)
+                if self.state.down_since is None:
+                    self.state.down_since = time.time()
+                if self._should_fail_over():
+                    log.warning(
+                        "auto-failover: promoting after %.1fs without a primary",
+                        self._auto_failover_after,
+                    )
+                    self.state.master = None
+                    self.state.link = "up"
+                    self.state.down_since = None
+                    return
             await asyncio.sleep(self._interval)
+
+    def _should_fail_over(self) -> bool:
+        if self._auto_failover_after is None or self.state.down_since is None:
+            return False
+        return time.time() - self.state.down_since >= self._auto_failover_after
 
     async def _follow(self, host: str, port: int) -> None:
         client = await connect(f"tcp://{host}:{port}")
@@ -175,6 +199,7 @@ class Replication:
             self.state.offset = int(offset_text)
             self.state.link = "up"
             self.state.last_error = None
+            self.state.down_since = None
             while True:
                 reply = await client.execute("REPLICATE", str(self.state.offset))
                 if reply is None:
