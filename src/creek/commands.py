@@ -112,7 +112,11 @@ async def cmd_auth(command: Command, context: Context) -> Reply:
     identity = context.authenticator.authenticate(command.args[0])
     if identity is None:
         raise CommandError("invalid password", code="WRONGPASS")
+    # AUTH selects the namespace, so the pub/sub subscriber moves with it.
+    # Drop any subscriptions registered under the previous namespace.
+    context.bus.remove(context.subscriber)
     context.identity = identity
+    context.subscriber.owner = identity.namespace
     return SimpleString("OK")
 
 

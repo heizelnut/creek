@@ -257,6 +257,9 @@ boundary in v1.
 - ACLs are coarse: `read`, `write`, `subscribe`, `admin` (or `all`/`*`).
 - Every command handler receives the resolved identity; the store owner is derived from it. Never
   trust a client-supplied namespace.
+- `AUTH` also moves the connection's pub/sub subscriber to the new namespace and drops any
+  subscriptions registered under the previous one (a namespace switch must not leave stale
+  subscriptions behind).
 
 Auth file schema:
 
@@ -513,6 +516,10 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — Namespace isolation is pinned by tests.** `tests/test_tenancy.py` asserts that
+  keys, channels, enumeration, flushing, retained messages, and persisted records are scoped by
+  owner, and that ACLs are per-identity (not per-namespace). `AUTH` moves the subscriber to the new
+  namespace and clears its subscriptions. These tests are the safety net for M6.
 - **2026-10-06 — Pub/sub delivery.** Each connection owns one `Subscriber` with a single bounded
   outbound queue; one writer task drains it, so replies and messages never interleave. Replies
   use blocking `send` (backpressure); pub/sub uses `deliver` (drop the subscriber if full). The
