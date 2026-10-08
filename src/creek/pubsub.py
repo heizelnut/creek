@@ -116,6 +116,12 @@ class Bus:
         for key in [key for key in self._retained if key[0] == owner]:
             del self._retained[key]
 
+    def clear_all(self) -> None:
+        """Drop every subscription and retained value (replica snapshot load)."""
+        self._channels.clear()
+        self._patterns.clear()
+        self._retained.clear()
+
     def owner_stats(self, owner: str) -> tuple[int, int]:
         """Return ``(channel_count, pattern_count)`` for ``owner``."""
         channels = sum(1 for (channel_owner, _) in self._channels if channel_owner == owner)

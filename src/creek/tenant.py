@@ -135,6 +135,10 @@ class TenantRegistry:
         """Tenant names, sorted."""
         return sorted(self._tenants)
 
+    def clear_all(self) -> None:
+        """Drop every tenant record (used when a replica loads a snapshot)."""
+        self._tenants.clear()
+
     def allow(self, name: str) -> bool:
         """Rate-limit check for one command."""
         tenant = self._tenants.get(name)

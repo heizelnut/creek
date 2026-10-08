@@ -154,6 +154,10 @@ class Store:
         if self.journal is not None:
             self.journal.flush(owner)
 
+    def clear_all(self) -> None:
+        """Drop every entry (used when a replica loads a snapshot)."""
+        self._data.clear()
+
     def entries(self) -> list[EntryRecord]:
         """Live entries for snapshotting: ``(owner, key, value, expires_at)``."""
         now = self._clock()

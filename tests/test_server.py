@@ -6,6 +6,7 @@ Both transports carry the same RESP2 bytes, so the assertions look alike.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 
 import pytest
@@ -23,6 +24,20 @@ async def server() -> AsyncIterator[Server]:
         yield instance
     finally:
         await instance.close()
+
+
+async def test_close_with_active_connection(server: Server) -> None:
+    # Regression: closing the server must not hang on an open TCP connection.
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.tcp_port)
+    try:
+        writer.write(b"PING\r\n")
+        await writer.drain()
+        assert await reader.readuntil(b"\r\n") == b"+PONG\r\n"
+        await asyncio.wait_for(server.close(), timeout=2.0)
+    finally:
+        writer.close()
+        with contextlib.suppress(ConnectionError, OSError):
+            await writer.wait_closed()
 
 
 async def test_tcp_ping(server: Server) -> None:

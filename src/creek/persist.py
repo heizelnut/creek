@@ -90,6 +90,44 @@ def decode_records(data: bytes) -> list[dict[str, Any]]:
     return records
 
 
+def set_record(owner: str, key: str, value: Value, expires_at: float | None) -> dict[str, Any]:
+    """Build a ``set`` record."""
+    return {
+        "op": "set",
+        "owner": owner,
+        "key": key,
+        "data": encode_blob(value),
+        "expires_at": expires_at,
+    }
+
+
+def delete_record(owner: str, key: str) -> dict[str, Any]:
+    """Build a ``delete`` record."""
+    return {"op": "delete", "owner": owner, "key": key}
+
+
+def flush_record(owner: str) -> dict[str, Any]:
+    """Build a ``flush`` record."""
+    return {"op": "flush", "owner": owner}
+
+
+def retain_record(owner: str, channel: str, value: Value) -> dict[str, Any]:
+    """Build a ``retain`` record."""
+    return {"op": "retain", "owner": owner, "channel": channel, "data": encode_blob(value)}
+
+
+def tenant_create_record(
+    name: str, created_at: float, quota: dict[str, int | float | None]
+) -> dict[str, Any]:
+    """Build a ``tenant_create`` record."""
+    return {"op": "tenant_create", "name": name, "created_at": created_at, "quota": quota}
+
+
+def tenant_drop_record(name: str) -> dict[str, Any]:
+    """Build a ``tenant_drop`` record."""
+    return {"op": "tenant_drop", "name": name}
+
+
 def encode_blob(value: Value) -> str:
     """Base64 of a value's canonical binary encoding."""
     return base64.b64encode(value.to_bytes()).decode("ascii")
@@ -170,34 +208,24 @@ class Wal:
     # --- Journal protocol ---
 
     def set(self, owner: str, key: str, value: Value, expires_at: float | None) -> None:
-        self.append(
-            {
-                "op": "set",
-                "owner": owner,
-                "key": key,
-                "data": encode_blob(value),
-                "expires_at": expires_at,
-            }
-        )
+        self.append(set_record(owner, key, value, expires_at))
 
     def delete(self, owner: str, key: str) -> None:
-        self.append({"op": "delete", "owner": owner, "key": key})
+        self.append(delete_record(owner, key))
 
     def flush(self, owner: str) -> None:
-        self.append({"op": "flush", "owner": owner})
+        self.append(flush_record(owner))
 
     def retain(self, owner: str, channel: str, value: Value) -> None:
-        self.append(
-            {"op": "retain", "owner": owner, "channel": channel, "data": encode_blob(value)}
-        )
+        self.append(retain_record(owner, channel, value))
 
     def tenant_create(
         self, name: str, created_at: float, quota: dict[str, int | float | None]
     ) -> None:
-        self.append({"op": "tenant_create", "name": name, "created_at": created_at, "quota": quota})
+        self.append(tenant_create_record(name, created_at, quota))
 
     def tenant_drop(self, name: str) -> None:
-        self.append({"op": "tenant_drop", "name": name})
+        self.append(tenant_drop_record(name))
 
     async def close(self) -> None:
         """Drain the queue, fsync, and close the file."""
@@ -215,9 +243,8 @@ class Wal:
         self._file.close()
 
 
-def write_snapshot(path: Path, snapshot: Snapshot) -> None:
-    """Write a versioned snapshot atomically (temp file -> fsync -> rename)."""
-    document = {
+def _document(snapshot: Snapshot) -> dict[str, Any]:
+    return {
         "version": SNAPSHOT_VERSION,
         "tenants": [
             {"name": name, "created_at": created_at, "quota": quota}
@@ -232,7 +259,21 @@ def write_snapshot(path: Path, snapshot: Snapshot) -> None:
             for owner, channel, value in snapshot.retained
         ],
     }
-    payload = json.dumps(document).encode("utf-8")
+
+
+def encode_snapshot(snapshot: Snapshot) -> bytes:
+    """Serialize a snapshot (used for replication)."""
+    return json.dumps(_document(snapshot)).encode("utf-8")
+
+
+def encode_records(records: list[dict[str, Any]]) -> bytes:
+    """Frame a batch of WAL records (used for replication)."""
+    return b"".join(encode_record(record) for record in records)
+
+
+def write_snapshot(path: Path, snapshot: Snapshot) -> None:
+    """Write a versioned snapshot atomically (temp file -> fsync -> rename)."""
+    payload = encode_snapshot(snapshot)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("wb") as handle:
         handle.write(payload)
@@ -242,14 +283,12 @@ def write_snapshot(path: Path, snapshot: Snapshot) -> None:
     _fsync_dir(path.parent)
 
 
-def read_snapshot(path: Path) -> Snapshot:
-    """Load a snapshot; a missing file yields an empty snapshot."""
-    if not path.exists():
-        return Snapshot([], [], [])
+def decode_snapshot(data: bytes) -> Snapshot:
+    """Parse a snapshot produced by :func:`encode_snapshot`."""
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PersistError(f"cannot read snapshot {path}: {exc}") from exc
+        document = json.loads(data)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise PersistError(f"invalid snapshot: {exc}") from exc
     if not isinstance(document, dict) or document.get("version") != SNAPSHOT_VERSION:
         version = document.get("version") if isinstance(document, dict) else None
         raise PersistError(f"unsupported snapshot version {version!r}")
@@ -266,6 +305,20 @@ def read_snapshot(path: Path) -> Snapshot:
         for item in document.get("tenants", [])
     ]
     return Snapshot(entries, retained, tenants)
+
+
+def read_snapshot(path: Path) -> Snapshot:
+    """Load a snapshot; a missing file yields an empty snapshot."""
+    if not path.exists():
+        return Snapshot([], [], [])
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise PersistError(f"cannot read snapshot {path}: {exc}") from exc
+    try:
+        return decode_snapshot(data)
+    except PersistError as exc:
+        raise PersistError(f"cannot read snapshot {path}: {exc}") from exc
 
 
 def load(data_dir: Path) -> tuple[Snapshot, list[dict[str, Any]]]:
@@ -291,9 +344,18 @@ __all__ = [
     "Wal",
     "decode_blob",
     "decode_records",
+    "decode_snapshot",
+    "delete_record",
     "encode_blob",
     "encode_record",
+    "encode_records",
+    "encode_snapshot",
+    "flush_record",
     "load",
     "read_snapshot",
+    "retain_record",
+    "set_record",
+    "tenant_create_record",
+    "tenant_drop_record",
     "write_snapshot",
 ]

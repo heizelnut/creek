@@ -6,6 +6,7 @@ Nothing else needs to change; both transports pick it up automatically.
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 from collections.abc import Awaitable, Callable, Sequence
@@ -15,8 +16,10 @@ from creek import __version__
 from creek.auth import Authenticator, Identity
 from creek.errors import CommandError, InvalidValue
 from creek.pattern import match
+from creek.persist import Snapshot, encode_records, encode_snapshot
 from creek.protocol import Command, Reply, SimpleString, encode_message
 from creek.pubsub import Bus, Subscriber
+from creek.replication import Replication
 from creek.store import Store
 from creek.tenant import Quota, Tenant, TenantRegistry
 from creek.value import Value, ValueType
@@ -41,6 +44,7 @@ class Context:
     subscriber: Subscriber = field(default_factory=Subscriber)
     pending: list[bytes] = field(default_factory=list)
     quota_tenant: str | None = None
+    replication: Replication = field(default_factory=Replication)
     close_after_reply: bool = False
 
 
@@ -91,6 +95,8 @@ async def execute(command: Command, context: Context) -> Reply:
 def _check_access(scope: str, context: Context) -> None:
     if scope == "public":
         return
+    if scope == "write" and context.replication.state.read_only:
+        raise CommandError("replica is read-only", code="READONLY")
     identity = context.identity
     if identity is None:
         authenticator = context.authenticator
@@ -153,6 +159,8 @@ async def cmd_info(command: Command, context: Context) -> Reply:
     section = command.args[0].lower() if command.args else "all"
     if section in ("tenant", "tenants"):
         return _tenant_report(context)
+    if section == "replication":
+        return _replication_report(context)
     if section not in ("all", "default", "server"):
         return ""
     return "\r\n".join(
@@ -682,6 +690,76 @@ async def cmd_pubsub(command: Command, context: Context) -> Reply:
     raise CommandError(f"unknown subcommand '{command.args[0]}'")
 
 
+# --- replication ---------------------------------------------------------
+
+
+def _replication_report(context: Context) -> str:
+    state = context.replication.state
+    log = context.replication.log
+    replica = state.master is not None
+    lines = ["# Replication", f"role:{'replica' if replica else 'master'}"]
+    if state.master is None:
+        lines.append(f"offset:{log.sequence}")
+        lines.append(f"backlog:{log.backlog()}")
+    else:
+        lines.append(f"master_host:{state.master[0]}")
+        lines.append(f"master_port:{state.master[1]}")
+        lines.append(f"offset:{state.offset}")
+        lines.append(f"link:{state.link}")
+        if state.last_error is not None:
+            lines.append(f"last_error:{state.last_error}")
+    return "\r\n".join(lines)
+
+
+async def cmd_sync(command: Command, context: Context) -> Reply:
+    snapshot = Snapshot(
+        entries=context.store.entries(),
+        retained=context.bus.retained_entries(),
+        tenants=context.tenants.entries(),
+    )
+    payload = base64.b64encode(encode_snapshot(snapshot)).decode("ascii")
+    return [str(context.replication.log.sequence), payload]
+
+
+async def cmd_replicate(command: Command, context: Context) -> Reply:
+    try:
+        offset = int(command.args[0], 10)
+    except ValueError as exc:
+        raise CommandError("invalid offset") from exc
+    records = context.replication.log.since(offset)
+    if records is None:
+        return None
+    payload = base64.b64encode(encode_records(records)).decode("ascii")
+    return [str(context.replication.log.sequence), payload]
+
+
+async def cmd_role(command: Command, context: Context) -> Reply:
+    state = context.replication.state
+    if state.master is None:
+        return ["master", context.replication.log.sequence]
+    host, port = state.master
+    return ["replica", host, port, state.offset, state.link]
+
+
+async def cmd_replicaof(command: Command, context: Context) -> Reply:
+    if (
+        len(command.args) == 2
+        and command.args[0].upper() == "NO"
+        and command.args[1].upper() == "ONE"
+    ):
+        await context.replication.promote()
+        return SimpleString("OK")
+    if len(command.args) not in (2, 3):
+        raise CommandError("syntax error")
+    try:
+        port = int(command.args[1], 10)
+    except ValueError as exc:
+        raise CommandError("invalid port") from exc
+    token = command.args[2] if len(command.args) == 3 else None
+    await context.replication.follow(command.args[0], port, token)
+    return SimpleString("OK")
+
+
 register("PING", cmd_ping, max_args=1, scope="public")
 register("ECHO", cmd_echo, min_args=1, max_args=1, scope="public")
 register("QUIT", cmd_quit, scope="public")
@@ -710,3 +788,7 @@ register("UNSUBSCRIBE", cmd_unsubscribe, max_args=None, scope="subscribe")
 register("PUNSUBSCRIBE", cmd_punsubscribe, max_args=None, scope="subscribe")
 register("PUBSUB", cmd_pubsub, min_args=1, max_args=None, scope="read")
 register("TENANT", cmd_tenant, min_args=1, max_args=None, scope="admin")
+register("SYNC", cmd_sync, scope="admin")
+register("REPLICATE", cmd_replicate, min_args=1, max_args=1, scope="admin")
+register("ROLE", cmd_role, scope="read")
+register("REPLICAOF", cmd_replicaof, min_args=1, max_args=3, scope="admin")

@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--fsync", choices=("always", "everysec", "no"), default="everysec", help="WAL fsync policy"
     )
     parser.add_argument("--snapshot-interval", default="5m", help="snapshot cadence (e.g. 5m)")
+    parser.add_argument("--replicaof", default=None, help="follow a primary (host:port)")
+    parser.add_argument("--replica-token", default=None, help="AUTH token for the primary")
     parser.add_argument("--log-level", default="info", help="debug|info|warning|error")
     parser.add_argument("--version", action="version", version=f"creek {__version__}")
     return parser
@@ -55,6 +57,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         snapshot_interval = parse_duration(args.snapshot_interval)
     except ValueError as exc:
         parser.error(str(exc))
+    replicaof: tuple[str, int, str | None] | None = None
+    if args.replicaof is not None:
+        host, _, port_text = args.replicaof.rpartition(":")
+        try:
+            replicaof = (host or "127.0.0.1", int(port_text), args.replica_token)
+        except ValueError:
+            parser.error(f"invalid --replicaof {args.replicaof!r}")
     config = Config(
         ws_addr=args.ws_addr,
         tcp_addr=args.tcp_addr,
@@ -63,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         auth_file=args.auth_file,
         fsync=args.fsync,
         snapshot_interval=snapshot_interval,
+        replicaof=replicaof,
     )
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(config))

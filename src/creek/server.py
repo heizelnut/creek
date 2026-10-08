@@ -14,6 +14,8 @@ import asyncio
 import contextlib
 import logging
 import mimetypes
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,7 @@ from creek.errors import CommandError, ProtocolError
 from creek.persist import Snapshot, Wal, decode_blob, write_snapshot
 from creek.protocol import Command, Error, Incomplete, Reply, encode, parse
 from creek.pubsub import Bus, Subscriber
+from creek.replication import Replication
 from creek.store import Store
 from creek.tenant import TenantRegistry
 
@@ -51,6 +54,7 @@ class Config:
     auth_file: Path | None = None
     fsync: str = "everysec"
     snapshot_interval: float = 300.0
+    replicaof: tuple[str, int, str | None] | None = None
 
 
 def parse_addr(addr: str) -> tuple[str, int]:
@@ -70,6 +74,7 @@ class Server:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.authenticator = Authenticator.from_file(config.auth_file) if config.auth_file else None
+        self.replication = Replication(apply_record=self._apply, load_snapshot=self._load_snapshot)
         self.store = Store()
         self.bus = Bus()
         self.tenants = TenantRegistry()
@@ -79,17 +84,22 @@ class Server:
             config.data_dir.mkdir(parents=True, exist_ok=True)
             self._recover(config.data_dir)
             self.journal = Wal(config.data_dir / "creek.wal", fsync=config.fsync)
-            self.store.journal = self.journal
-            self.bus.journal = self.journal
-            self.tenants.journal = self.journal
+            self.replication.log.set_wal(self.journal)
+        self.store.journal = self.replication.log
+        self.bus.journal = self.replication.log
+        self.tenants.journal = self.replication.log
         self._tcp: asyncio.Server | None = None
         self._ws: WsServer | None = None
+        self._writers: set[asyncio.StreamWriter] = set()
         self._stop = asyncio.Event()
         self.tcp_port = 0
         self.ws_port = 0
 
     async def start(self) -> None:
         """Bind both listeners; ports are available afterwards."""
+        if self.config.replicaof is not None:
+            host, port, token = self.config.replicaof
+            await self.replication.follow(host, port, token)
         if self.journal is not None:
             self.journal.start()
             if self.config.snapshot_interval > 0:
@@ -122,9 +132,13 @@ class Server:
         self._stop.set()
 
     async def close(self) -> None:
-        """Close both listeners, snapshot, and close the WAL."""
+        """Stop replication, close listeners, snapshot, and close the WAL."""
+        await self.replication.stop()
         if self._tcp is not None:
             self._tcp.close()
+        for writer in list(self._writers):
+            writer.close()  # unblock in-flight handlers so wait_closed() returns
+        if self._tcp is not None:
             await self._tcp.wait_closed()
         if self._ws is not None:
             self._ws.close()
@@ -159,28 +173,60 @@ class Server:
                 },
             )
 
+    @contextmanager
+    def _no_journal(self) -> Iterator[None]:
+        """Suspend journaling while applying recovered/replicated state."""
+        store_journal, bus_journal, tenant_journal = (
+            self.store.journal,
+            self.bus.journal,
+            self.tenants.journal,
+        )
+        self.store.journal = None
+        self.bus.journal = None
+        self.tenants.journal = None
+        try:
+            yield
+        finally:
+            self.store.journal = store_journal
+            self.bus.journal = bus_journal
+            self.tenants.journal = tenant_journal
+
     def _apply(self, record: dict[str, Any]) -> None:
-        op = record.get("op")
-        if op == "set":
-            value = decode_blob(record["data"])
-            self.store.restore(record["owner"], record["key"], value, record.get("expires_at"))
-        elif op == "delete":
-            self.store.delete(record["owner"], record["key"])
-        elif op == "flush":
-            self.store.clear(record["owner"])
-        elif op == "retain":
-            self.bus.restore_retained(
-                record["owner"], record["channel"], decode_blob(record["data"])
-            )
-        elif op == "tenant_create":
-            self.tenants.restore(record["name"], record["created_at"], record.get("quota", {}))
-        elif op == "tenant_drop":
-            name = record["name"]
-            self.tenants.drop(name)
-            self.store.clear(name)
-            self.bus.drop_owner(name)
-        else:
-            log.warning("ignoring unknown WAL record", extra={"op": op})
+        with self._no_journal():
+            op = record.get("op")
+            if op == "set":
+                value = decode_blob(record["data"])
+                self.store.restore(record["owner"], record["key"], value, record.get("expires_at"))
+            elif op == "delete":
+                self.store.delete(record["owner"], record["key"])
+            elif op == "flush":
+                self.store.clear(record["owner"])
+            elif op == "retain":
+                self.bus.restore_retained(
+                    record["owner"], record["channel"], decode_blob(record["data"])
+                )
+            elif op == "tenant_create":
+                self.tenants.restore(record["name"], record["created_at"], record.get("quota", {}))
+            elif op == "tenant_drop":
+                name = record["name"]
+                self.tenants.drop(name)
+                self.store.clear(name)
+                self.bus.drop_owner(name)
+            else:
+                log.warning("ignoring unknown WAL record", extra={"op": op})
+
+    def _load_snapshot(self, snapshot: Snapshot) -> None:
+        """Replace local state with a primary's snapshot (replica full resync)."""
+        with self._no_journal():
+            self.store.clear_all()
+            self.bus.clear_all()
+            self.tenants.clear_all()
+            for owner, key, value, expires_at in snapshot.entries:
+                self.store.restore(owner, key, value, expires_at)
+            for owner, channel, value in snapshot.retained:
+                self.bus.restore_retained(owner, channel, value)
+            for name, created_at, quota in snapshot.tenants:
+                self.tenants.restore(name, created_at, quota)
 
     async def _snapshot(self) -> None:
         data_dir = self.config.data_dir
@@ -223,6 +269,7 @@ class Server:
             tenants=self.tenants,
             subscriber=Subscriber(namespace),
             quota_tenant=quota_tenant,
+            replication=self.replication,
         )
 
     async def _run(self, command: Command, context: Context) -> Reply:
@@ -250,6 +297,7 @@ class Server:
             writer.close()
             return
         subscriber = context.subscriber
+        self._writers.add(writer)
         pump = asyncio.create_task(_pump_tcp(writer, subscriber))
         buffer = b""
         log.debug("tcp client connected", extra={"peer": peer})
@@ -284,6 +332,7 @@ class Server:
             self.bus.remove(subscriber)
             if context.quota_tenant is not None:
                 self.tenants.release(context.quota_tenant)
+            self._writers.discard(writer)
             writer.close()
             with contextlib.suppress(ConnectionError, OSError):
                 await writer.wait_closed()
