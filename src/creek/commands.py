@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from creek import __version__
 from creek.auth import Authenticator, Identity
+from creek.cluster import Cluster, key_slot
 from creek.errors import CommandError, InvalidValue
 from creek.pattern import match
 from creek.persist import Snapshot, encode_records, encode_snapshot
@@ -45,6 +46,7 @@ class Context:
     pending: list[bytes] = field(default_factory=list)
     quota_tenant: str | None = None
     replication: Replication = field(default_factory=Replication)
+    cluster: Cluster | None = None
     close_after_reply: bool = False
 
 
@@ -86,6 +88,7 @@ async def execute(command: Command, context: Context) -> Reply:
         raise CommandError(f"wrong number of arguments for '{command.name.lower()}'")
     _check_access(spec.scope, context)
     _check_lengths(command)
+    _check_cluster(command, context)
     _check_rate(context)
     if spec.scope == "admin":
         _audit(command, context)
@@ -251,6 +254,24 @@ def _check_lengths(command: Command) -> None:
         channels = command.args if command.name in _MULTI_CHANNEL_COMMANDS else command.args[:1]
         for channel in channels:
             _check_channel(channel)
+
+
+def _check_cluster(command: Command, context: Context) -> None:
+    cluster = context.cluster
+    if cluster is None or command.name not in _KEY_COMMANDS:
+        return
+    keys = command.args if command.name in _MULTI_KEY_COMMANDS else command.args[:1]
+    if not keys:
+        return
+    slots = {key_slot(key) for key in keys}
+    if len(slots) > 1:
+        raise CommandError("keys in request don't hash to the same slot", code="CROSSSLOT")
+    slot = next(iter(slots))
+    node = cluster.owner(slot)
+    if node is None:
+        raise CommandError("hash slot not served", code="CLUSTERDOWN")
+    if node.addr != cluster.self_addr:
+        raise CommandError(f"{slot} {node.addr}", code="MOVED")
 
 
 def _audit(command: Command, context: Context) -> None:
@@ -760,6 +781,38 @@ async def cmd_replicaof(command: Command, context: Context) -> Reply:
     return SimpleString("OK")
 
 
+async def cmd_keyslot(command: Command, context: Context) -> Reply:
+    return key_slot(command.args[0])
+
+
+def _cluster_report(cluster: Cluster | None) -> str:
+    lines = ["# Cluster", f"cluster_enabled:{1 if cluster is not None else 0}"]
+    if cluster is not None:
+        lines.append(f"cluster_known_nodes:{len(cluster.nodes)}")
+        lines.append(f"cluster_self:{cluster.self_addr}")
+        lines.append(f"cluster_slots:{cluster.assigned()}")
+    return "\r\n".join(lines)
+
+
+async def cmd_cluster(command: Command, context: Context) -> Reply:
+    subcommand = command.args[0].upper()
+    cluster = context.cluster
+    if subcommand == "INFO":
+        return _cluster_report(cluster)
+    if subcommand == "MYID":
+        return cluster.self_addr if cluster is not None else ""
+    if subcommand == "SLOTS":
+        if cluster is None:
+            return []
+        slots: list[Reply] = []
+        for node in cluster.nodes:
+            ip, _, port = node.addr.rpartition(":")
+            for start, end in node.slots:
+                slots.append([start, end, [ip, int(port), node.addr]])
+        return slots
+    raise CommandError(f"unknown subcommand '{command.args[0]}'")
+
+
 register("PING", cmd_ping, max_args=1, scope="public")
 register("ECHO", cmd_echo, min_args=1, max_args=1, scope="public")
 register("QUIT", cmd_quit, scope="public")
@@ -792,3 +845,5 @@ register("SYNC", cmd_sync, scope="admin")
 register("REPLICATE", cmd_replicate, min_args=1, max_args=1, scope="admin")
 register("ROLE", cmd_role, scope="read")
 register("REPLICAOF", cmd_replicaof, min_args=1, max_args=3, scope="admin")
+register("KEYSLOT", cmd_keyslot, min_args=1, max_args=1, scope="read")
+register("CLUSTER", cmd_cluster, min_args=1, max_args=None, scope="admin")

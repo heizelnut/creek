@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from creek import __version__
+from creek.cluster import Cluster
 from creek.server import Config, Server
 
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)(ms|s|m|h)?$")
@@ -40,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot-interval", default="5m", help="snapshot cadence (e.g. 5m)")
     parser.add_argument("--replicaof", default=None, help="follow a primary (host:port)")
     parser.add_argument("--replica-token", default=None, help="AUTH token for the primary")
+    parser.add_argument("--cluster-config", type=Path, default=None, help="JSON slot topology")
     parser.add_argument("--log-level", default="info", help="debug|info|warning|error")
     parser.add_argument("--version", action="version", version=f"creek {__version__}")
     return parser
@@ -64,6 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             replicaof = (host or "127.0.0.1", int(port_text), args.replica_token)
         except ValueError:
             parser.error(f"invalid --replicaof {args.replicaof!r}")
+    cluster = Cluster.from_file(args.cluster_config) if args.cluster_config else None
     config = Config(
         ws_addr=args.ws_addr,
         tcp_addr=args.tcp_addr,
@@ -73,6 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         fsync=args.fsync,
         snapshot_interval=snapshot_interval,
         replicaof=replicaof,
+        cluster=cluster,
     )
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(config))

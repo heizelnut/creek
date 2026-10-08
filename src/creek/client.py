@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Protocol
@@ -152,11 +152,20 @@ class _TcpConnection:
             await self._writer.wait_closed()
 
 
-class Client:
-    """A Creek client over WebSocket or TCP."""
+Redirect = Callable[[str], Awaitable["_Connection"]]
 
-    def __init__(self, connection: _Connection) -> None:
+
+class Client:
+    """A Creek client over WebSocket or TCP.
+
+    On a TCP connection the client follows ``MOVED`` redirects (see M7b) by
+    reconnecting to the target node; WebSocket clients do not, because the
+    advertised address is a TCP address.
+    """
+
+    def __init__(self, connection: _Connection, *, redirect: Redirect | None = None) -> None:
         self._connection = connection
+        self._redirect = redirect
 
     async def __aenter__(self) -> Client:
         return self
@@ -182,6 +191,11 @@ class Client:
         await self._connection.send(encode_command(name, args))
         reply = await self._connection.receive()
         if isinstance(reply, _ServerError):
+            if reply.code == "MOVED" and self._redirect is not None:
+                _, _, target = reply.message.partition(" ")
+                await self._connection.close()
+                self._connection = await self._redirect(target.strip())
+                return await self.execute(name, *args)
             raise CommandError(reply.message, code=reply.code)
         return reply
 
@@ -252,7 +266,12 @@ async def connect(uri: str) -> Client:
     host, _, port = target.rpartition(":")
     if not port:
         raise ValueError(f"invalid address {uri!r}")
-    return Client(await _TcpConnection.connect(host or "127.0.0.1", int(port)))
+
+    async def redirect(addr: str) -> _Connection:
+        r_host, _, r_port = addr.rpartition(":")
+        return await _TcpConnection.connect(r_host or "127.0.0.1", int(r_port))
+
+    return Client(await _TcpConnection.connect(host or "127.0.0.1", int(port)), redirect=redirect)
 
 
 __all__ = ["Client", "connect", "encode_command"]

@@ -28,6 +28,7 @@ from websockets.http11 import Request, Response
 
 from creek import persist
 from creek.auth import ANONYMOUS, Authenticator
+from creek.cluster import Cluster
 from creek.commands import Context, execute
 from creek.errors import CommandError, ProtocolError
 from creek.persist import Snapshot, Wal, decode_blob, write_snapshot
@@ -55,6 +56,7 @@ class Config:
     fsync: str = "everysec"
     snapshot_interval: float = 300.0
     replicaof: tuple[str, int, str | None] | None = None
+    cluster: Cluster | None = None
 
 
 def parse_addr(addr: str) -> tuple[str, int]:
@@ -73,6 +75,7 @@ class Server:
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        self.cluster = config.cluster
         self.authenticator = Authenticator.from_file(config.auth_file) if config.auth_file else None
         self.replication = Replication(apply_record=self._apply, load_snapshot=self._load_snapshot)
         self.store = Store()
@@ -270,6 +273,7 @@ class Server:
             subscriber=Subscriber(namespace),
             quota_tenant=quota_tenant,
             replication=self.replication,
+            cluster=self.cluster,
         )
 
     async def _run(self, command: Command, context: Context) -> Reply:
