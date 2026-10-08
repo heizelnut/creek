@@ -143,6 +143,7 @@ uv run creek \
 creek/
 ├── AGENTS.md
 ├── PROTOCOL.md
+├── CLUSTERING.md
 ├── pyproject.toml
 ├── uv.lock
 ├── src/creek/
@@ -395,7 +396,9 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 7. **Python client library** — *resolved*: `creek.client` (async, both transports). A separate
    `creek-client` distribution is still optional.
 8. **Clustering** — v1 is single-node by default; **M7a/M7b** are implemented (§17). Open items:
-   `ASK` redirects during resharding, gossip-based membership, and a stateless proxy.
+   `ASK` redirects during resharding, gossip-based membership, and a stateless proxy. A full
+   design sketch (config epochs, cluster bus, elections, resharding, cluster pub/sub) is in
+   `CLUSTERING.md`.
 9. **Streaming parser re-parse** — the TCP reader re-parses its buffer from the start after each
    read (simplest correct approach). Add a cursor if very large commands become a real workload.
 10. **SCAN cursor** — an index into the sorted key list, not a reverse-binary cursor like Redis;
@@ -477,6 +480,10 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
     promotion (`--auto-failover-after`). *(implemented, best-effort)* **Not** consensus-safe: a
     returning primary can cause split-brain, and there is no leader election. Cluster-wide pub/sub
     routing is **not implemented** (see §14.14).
+- **M8 — Full clustering (design sketch):** close the M7 gap — config epochs, a gossip cluster
+  bus, quorum failure detection, replica elections, resharding, and cluster-wide pub/sub. See
+  `CLUSTERING.md` for the design and the proposed M8a–M8f phases. Requires a durable-ack barrier
+  (`WAIT`/group commit) before automatic failover can be trusted.
 
 ## 18. Decision log
 
