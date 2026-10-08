@@ -71,7 +71,7 @@ def test_snapshot_roundtrip(tmp_path: Path) -> None:
     snapshot = Snapshot(
         entries=[("ns", "k", Value.parse("i32", "42"), None)],
         retained=[("ns", "ch", _value("last"))],
-        tenants=[("ns", 1000.0)],
+        tenants=[("ns", 1000.0, {"max_keys": 10})],
     )
     path = tmp_path / "creek.snapshot"
     write_snapshot(path, snapshot)

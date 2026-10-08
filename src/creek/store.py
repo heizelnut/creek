@@ -128,6 +128,25 @@ class Store:
         """Number of live keys for ``owner``."""
         return len(self.keys(owner))
 
+    def usage(self, owner: str) -> tuple[int, int]:
+        """Live ``(key_count, approximate_bytes)`` for ``owner``.
+
+        Bytes are ``len(key) + len(value.to_bytes())`` per entry — a rough
+        estimate, not allocator overhead.
+        """
+        count = 0
+        total = 0
+        now = self._clock()
+        for (entry_owner, key), entry in list(self._data.items()):
+            if entry_owner != owner:
+                continue
+            if entry.expires_at is not None and entry.expires_at <= now:
+                del self._data[(entry_owner, key)]
+                continue
+            count += 1
+            total += len(key.encode("utf-8")) + len(entry.value.to_bytes())
+        return count, total
+
     def clear(self, owner: str) -> None:
         """Delete every key for ``owner`` (FLUSHALL)."""
         for key in [item for item in self._data if item[0] == owner]:

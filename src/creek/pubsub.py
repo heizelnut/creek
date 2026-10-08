@@ -122,6 +122,20 @@ class Bus:
         patterns = sum(1 for (pattern_owner, _) in self._patterns if pattern_owner == owner)
         return channels, patterns
 
+    def subscription_count(self, owner: str) -> int:
+        """Total channel + pattern subscriptions held by ``owner``."""
+        channels = sum(len(members) for (o, _), members in self._channels.items() if o == owner)
+        patterns = sum(len(members) for (o, _), members in self._patterns.items() if o == owner)
+        return channels + patterns
+
+    def usage(self, owner: str) -> int:
+        """Approximate retained-value bytes for ``owner``."""
+        return sum(
+            len(channel.encode("utf-8")) + len(value.to_bytes())
+            for (o, channel), value in self._retained.items()
+            if o == owner
+        )
+
     def publish(self, owner: str, channel: str, value: Value) -> int:
         """Deliver to channel and pattern subscribers; return the number reached."""
         frame = encode_message(channel, value.type.tag, value.text())

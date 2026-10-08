@@ -30,7 +30,7 @@ SNAPSHOT_VERSION = 1
 _FRAME = struct.Struct("<II")
 EntryRecord = tuple[str, str, Value, float | None]
 RetainedRecord = tuple[str, str, Value]
-TenantRecord = tuple[str, float]
+TenantRecord = tuple[str, float, dict[str, int | float | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +53,9 @@ class Journal(Protocol):
 
     def retain(self, owner: str, channel: str, value: Value) -> None: ...
 
-    def tenant_create(self, name: str, created_at: float) -> None: ...
+    def tenant_create(
+        self, name: str, created_at: float, quota: dict[str, int | float | None]
+    ) -> None: ...
 
     def tenant_drop(self, name: str) -> None: ...
 
@@ -189,8 +191,10 @@ class Wal:
             {"op": "retain", "owner": owner, "channel": channel, "data": encode_blob(value)}
         )
 
-    def tenant_create(self, name: str, created_at: float) -> None:
-        self.append({"op": "tenant_create", "name": name, "created_at": created_at})
+    def tenant_create(
+        self, name: str, created_at: float, quota: dict[str, int | float | None]
+    ) -> None:
+        self.append({"op": "tenant_create", "name": name, "created_at": created_at, "quota": quota})
 
     def tenant_drop(self, name: str) -> None:
         self.append({"op": "tenant_drop", "name": name})
@@ -216,7 +220,8 @@ def write_snapshot(path: Path, snapshot: Snapshot) -> None:
     document = {
         "version": SNAPSHOT_VERSION,
         "tenants": [
-            {"name": name, "created_at": created_at} for name, created_at in snapshot.tenants
+            {"name": name, "created_at": created_at, "quota": quota}
+            for name, created_at, quota in snapshot.tenants
         ],
         "entries": [
             {"owner": owner, "key": key, "data": encode_blob(value), "expires_at": expires_at}
@@ -257,7 +262,8 @@ def read_snapshot(path: Path) -> Snapshot:
         for item in document.get("retained", [])
     ]
     tenants: list[TenantRecord] = [
-        (item["name"], item["created_at"]) for item in document.get("tenants", [])
+        (item["name"], item["created_at"], item.get("quota", {}))
+        for item in document.get("tenants", [])
     ]
     return Snapshot(entries, retained, tenants)
 

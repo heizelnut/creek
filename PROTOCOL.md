@@ -281,10 +281,15 @@ Notes:
 | `INFO [section]` | | bulk text |
 | `FLUSHALL` | | `OK` (admin only) |
 | `COMMAND [COUNT]` | | array of names / integer |
-| `TENANT CREATE\|LIST\|DROP\|INFO [name]` | | `OK` / names / `1` / `0` / info |
+| `TENANT CREATE\|LIST\|DROP\|INFO\|SET …` | | `OK` / names / `1` / `0` / info |
 
 `TENANT` is admin-only. Tenants are auto-provisioned when a client authenticates into a namespace;
 `TENANT DROP` clears the tenant's keys, channels, and retained values and removes the record.
+
+`TENANT CREATE <name> [MAXKEYS n] [MAXMEMORY bytes] [MAXCONNECTIONS n] [MAXSUBSCRIPTIONS n]
+[MAXRATE n]` sets limits; `TENANT SET <name> <limit> <n>` updates one. Exceeding a limit returns a
+`QUOTA` error. Memory is approximated as `len(key) + len(value blob)` per entry plus retained
+values.
 
 ---
 
@@ -298,7 +303,7 @@ Glob patterns are used by `KEYS`, `PUBSUB`, and `PSUBSCRIBE`:
 
 ## 8. Errors
 
-Errors are `ERR …` (or `WRONGPASS`, `NOPERM`, `NOAUTH`) and never terminate the
+Errors are `ERR …` (or `WRONGPASS`, `NOPERM`, `NOAUTH`, `QUOTA`) and never terminate the
 connection. Unknown commands return `ERR unknown command '<name>'`; arity
 violations return `ERR wrong number of arguments for '<cmd>'`.
 

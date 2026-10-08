@@ -144,8 +144,8 @@ class Server:
             self.store.restore(owner, key, value, expires_at)
         for owner, channel, value in snapshot.retained:
             self.bus.restore_retained(owner, channel, value)
-        for name, created_at in snapshot.tenants:
-            self.tenants.restore(name, created_at)
+        for name, created_at, quota in snapshot.tenants:
+            self.tenants.restore(name, created_at, quota)
         for record in records:
             self._apply(record)
         if snapshot.entries or snapshot.retained or snapshot.tenants or records:
@@ -173,7 +173,7 @@ class Server:
                 record["owner"], record["channel"], decode_blob(record["data"])
             )
         elif op == "tenant_create":
-            self.tenants.restore(record["name"], record["created_at"])
+            self.tenants.restore(record["name"], record["created_at"], record.get("quota", {}))
         elif op == "tenant_drop":
             name = record["name"]
             self.tenants.drop(name)
@@ -206,8 +206,14 @@ class Server:
         anonymous = self.authenticator is None or self.authenticator.allow_anonymous
         identity = ANONYMOUS if anonymous else None
         namespace = identity.namespace if identity is not None else "default"
+        quota_tenant: str | None = None
         if identity is not None:
             self.tenants.ensure(identity.namespace)
+            if not self.tenants.acquire(identity.namespace):
+                raise CommandError(
+                    f"connection quota exceeded for tenant '{identity.namespace}'", code="QUOTA"
+                )
+            quota_tenant = identity.namespace
         return Context(
             peer=peer,
             identity=identity,
@@ -216,6 +222,7 @@ class Server:
             bus=self.bus,
             tenants=self.tenants,
             subscriber=Subscriber(namespace),
+            quota_tenant=quota_tenant,
         )
 
     async def _run(self, command: Command, context: Context) -> Reply:
@@ -235,7 +242,13 @@ class Server:
 
     async def _handle_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = _peer_name(writer.get_extra_info("peername"))
-        context = self._new_context(peer)
+        try:
+            context = self._new_context(peer)
+        except CommandError as exc:
+            writer.write(encode(Error(str(exc))))
+            await writer.drain()
+            writer.close()
+            return
         subscriber = context.subscriber
         pump = asyncio.create_task(_pump_tcp(writer, subscriber))
         buffer = b""
@@ -269,6 +282,8 @@ class Server:
             with contextlib.suppress(asyncio.CancelledError):
                 await pump
             self.bus.remove(subscriber)
+            if context.quota_tenant is not None:
+                self.tenants.release(context.quota_tenant)
             writer.close()
             with contextlib.suppress(ConnectionError, OSError):
                 await writer.wait_closed()
@@ -276,7 +291,12 @@ class Server:
 
     async def _handle_ws(self, websocket: ServerConnection) -> None:
         peer = _peer_name(websocket.remote_address)
-        context = self._new_context(peer)
+        try:
+            context = self._new_context(peer)
+        except CommandError as exc:
+            await websocket.send(encode(Error(str(exc))))
+            await websocket.close()
+            return
         subscriber = context.subscriber
         pump = asyncio.create_task(_pump_ws(websocket, subscriber))
         log.debug("ws client connected", extra={"peer": peer})
@@ -302,6 +322,8 @@ class Server:
             with contextlib.suppress(asyncio.CancelledError):
                 await pump
             self.bus.remove(subscriber)
+            if context.quota_tenant is not None:
+                self.tenants.release(context.quota_tenant)
             log.debug("ws client disconnected", extra={"peer": peer})
 
     async def _serve_http(self, connection: ServerConnection, request: Request) -> Response | None:

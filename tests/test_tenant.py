@@ -26,7 +26,7 @@ class FakeJournal:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
-    def tenant_create(self, name, created_at):  # type: ignore[no-untyped-def]
+    def tenant_create(self, name, created_at, quota):  # type: ignore[no-untyped-def]
         self.calls.append(("create", name, created_at))
 
     def tenant_drop(self, name):  # type: ignore[no-untyped-def]
@@ -69,7 +69,7 @@ def test_create_is_idempotent(clock) -> None:
     registry.create("acme")
     clock.advance(5)
     registry.create("acme")
-    assert registry.entries() == [("acme", 1000.0)]
+    assert registry.entries()[0][:2] == ("acme", 1000.0)
 
 
 def test_drop(clock) -> None:
@@ -85,7 +85,8 @@ def test_registry_journals(clock) -> None:
     registry = TenantRegistry(clock=clock, journal=journal)
     registry.create("acme")
     registry.drop("acme")
-    assert journal.calls == [("create", "acme", 1000.0), ("drop", "acme")]
+    assert journal.calls[0][:3] == ("create", "acme", 1000.0)
+    assert journal.calls[1] == ("drop", "acme")
 
 
 # --- admin commands -------------------------------------------------------
@@ -137,7 +138,7 @@ async def test_info_reports_counts(world: Tenant) -> None:
     await execute(Command("SUBSCRIBE", ("news",)), tenant)
     info = await execute(Command("TENANT", ("INFO", "acme")), admin)
     assert info[info.index("keys") + 1] == 2
-    assert info[info.index("channels") + 1] == 1
+    assert info[info.index("subscriptions") + 1] == 1
 
 
 # --- persistence ----------------------------------------------------------

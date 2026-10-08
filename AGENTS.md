@@ -261,6 +261,9 @@ boundary in v1.
 - `AUTH` also moves the connection's pub/sub subscriber to the new namespace and drops any
   subscriptions registered under the previous one (a namespace switch must not leave stale
   subscriptions behind).
+- Tenants carry optional quotas (M6b): keys, approximate memory, connections, subscriptions, and
+  command rate. Exceeding one returns a `QUOTA` error. Memory is approximated as
+  `len(key) + len(value blob)` per entry plus retained values.
 
 Auth file schema:
 
@@ -279,8 +282,8 @@ Auth file schema:
 Today a "namespace" is a scoping prefix on keys and channels, not a hard isolation boundary: one
 process, one store, one WAL, coarse ACLs. The data model is tenant-ready — every entry carries its
 owner and every WAL record is tagged — and **M6a** (§17) now makes tenants explicit
-(`TENANT …`, auto-provisioned on `AUTH`, journaled and snapshotted). Quotas and per-tenant
-observability/persistence are **M6b/M6c**.
+(`TENANT …`, auto-provisioned on `AUTH`, journaled and snapshotted), while **M6b** adds per-tenant
+quotas. Per-tenant observability/persistence are **M6c**.
 
 ## 9. Transports and framing
 
@@ -449,7 +452,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
   - **M6a — Registry + admin API:** `TENANT CREATE|LIST|DROP|INFO` (admin scope), auto-provisioned
     when a client authenticates, journaled and snapshotted. *(implemented)*
   - **M6b — Quotas:** keys, approximate memory, connections, subscriptions, and command rate per
-    tenant; quota failures return a `QUOTA` error.
+    tenant; quota failures return a `QUOTA` error. *(implemented)*
   - **M6c — Observability + hardening:** per-tenant counters (`INFO tenant`), key/channel length
     limits, no cross-tenant enumeration, audit logging of admin actions. Requires `--auth-file`.
 - **M7 — Clustering (multi-phase; exploratory):** v1 is single-node and nothing in it assumes a
@@ -517,6 +520,13 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — Tenant quotas (M6b).** Optional per-tenant limits: `max_keys`, `max_memory`,
+  `max_connections`, `max_subscriptions`, and `max_rate` (a token bucket). Memory is an
+  **approximation**: `len(key) + len(value.to_bytes())` per key plus retained channel values, not
+  allocator overhead. Set via `TENANT CREATE … MAXKEYS n …` / `TENANT SET`; violations raise a
+  `QUOTA` error. `Store.usage` / `Bus.usage` compute the estimate on demand (only when a limit is
+  set). Connection slots are acquired at `AUTH` (and for anonymous connections at accept) and
+  released on disconnect.
 - **2026-10-06 — Tenants (M6a).** Tenants are explicit records (`creek.tenant`) with a lifecycle;
   `TENANT CREATE|LIST|DROP|INFO` is admin-scoped. Tenants are auto-provisioned when a client
   authenticates (so existing auth files keep working) and are journaled + snapshotted. `TENANT

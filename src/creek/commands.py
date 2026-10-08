@@ -7,7 +7,7 @@ Nothing else needs to change; both transports pick it up automatically.
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
 from creek import __version__
@@ -17,7 +17,7 @@ from creek.pattern import match
 from creek.protocol import Command, Reply, SimpleString, encode_message
 from creek.pubsub import Bus, Subscriber
 from creek.store import Store
-from creek.tenant import TenantRegistry
+from creek.tenant import Quota, TenantRegistry
 from creek.value import Value, ValueType
 
 
@@ -37,6 +37,7 @@ class Context:
     tenants: TenantRegistry = field(default_factory=TenantRegistry)
     subscriber: Subscriber = field(default_factory=Subscriber)
     pending: list[bytes] = field(default_factory=list)
+    quota_tenant: str | None = None
     close_after_reply: bool = False
 
 
@@ -77,6 +78,7 @@ async def execute(command: Command, context: Context) -> Reply:
     if count < spec.min_args or (spec.max_args is not None and count > spec.max_args):
         raise CommandError(f"wrong number of arguments for '{command.name.lower()}'")
     _check_access(spec.scope, context)
+    _check_rate(context)
     return await spec.handler(command, context)
 
 
@@ -120,6 +122,12 @@ async def cmd_auth(command: Command, context: Context) -> Reply:
     context.identity = identity
     context.subscriber.owner = identity.namespace
     context.tenants.ensure(identity.namespace)
+    previous = context.quota_tenant
+    if previous != identity.namespace and not context.tenants.acquire(identity.namespace):
+        raise _quota(f"connection quota exceeded for tenant '{identity.namespace}'")
+    if previous is not None and previous != identity.namespace:
+        context.tenants.release(previous)
+    context.quota_tenant = identity.namespace
     return SimpleString("OK")
 
 
@@ -168,6 +176,96 @@ def _parse_value(tag: str, raw: str) -> Value:
         raise CommandError(str(exc)) from exc
 
 
+# --- quotas --------------------------------------------------------------
+
+_LIMIT_FIELDS = {
+    "MAXKEYS": "max_keys",
+    "MAXMEMORY": "max_memory",
+    "MAXCONNECTIONS": "max_connections",
+    "MAXSUBSCRIPTIONS": "max_subscriptions",
+    "MAXRATE": "max_rate",
+}
+
+
+def _quota(message: str) -> CommandError:
+    return CommandError(message, code="QUOTA")
+
+
+def _limit(value: int | float | None) -> int:
+    return -1 if value is None else int(value)
+
+
+def _entry_size(key: str, value: Value) -> int:
+    return len(key.encode("utf-8")) + len(value.to_bytes())
+
+
+def _parse_limits(args: Sequence[str]) -> dict[str, int | float | None]:
+    values: dict[str, int | float | None] = {}
+    index = 0
+    while index < len(args):
+        field = _LIMIT_FIELDS.get(args[index].upper())
+        if field is None or index + 1 >= len(args):
+            raise CommandError(f"syntax error near '{args[index]}'")
+        try:
+            number = int(args[index + 1], 10)
+        except ValueError as exc:
+            raise CommandError("value is not an integer or out of range") from exc
+        if number < 0:
+            raise CommandError("quota must be non-negative")
+        values[field] = number
+        index += 2
+    return values
+
+
+def _check_rate(context: Context) -> None:
+    owner = _owner(context)
+    if not context.tenants.allow(owner):
+        raise _quota(f"rate quota exceeded for tenant '{owner}'")
+
+
+def _check_write_quota(
+    context: Context, owner: str, key: str, value: Value, existing: Value | None
+) -> None:
+    tenant = context.tenants.get(owner)
+    if tenant is None:
+        return
+    quota = tenant.quota
+    if quota.max_keys is None and quota.max_memory is None:
+        return
+    count, store_bytes = context.store.usage(owner)
+    if quota.max_keys is not None and existing is None and count >= quota.max_keys:
+        raise _quota(f"key quota exceeded for tenant '{owner}'")
+    if quota.max_memory is not None:
+        total = store_bytes + context.bus.usage(owner)
+        delta = _entry_size(key, value)
+        if existing is not None:
+            delta -= _entry_size(key, existing)
+        if total + delta > quota.max_memory:
+            raise _quota(f"memory quota exceeded for tenant '{owner}'")
+
+
+def _check_retain_quota(context: Context, owner: str, channel: str, value: Value) -> None:
+    tenant = context.tenants.get(owner)
+    if tenant is None or tenant.quota.max_memory is None:
+        return
+    total = context.store.usage(owner)[1] + context.bus.usage(owner)
+    delta = _entry_size(channel, value)
+    previous = context.bus.retained(owner, channel)
+    if previous is not None:
+        delta -= _entry_size(channel, previous)
+    if total + delta > tenant.quota.max_memory:
+        raise _quota(f"memory quota exceeded for tenant '{owner}'")
+
+
+def _check_subscription_quota(context: Context, owner: str, adding: int) -> None:
+    tenant = context.tenants.get(owner)
+    if tenant is None or tenant.quota.max_subscriptions is None:
+        return
+    current = context.bus.subscription_count(owner)
+    if current + adding > tenant.quota.max_subscriptions:
+        raise _quota(f"subscription quota exceeded for tenant '{owner}'")
+
+
 async def cmd_set(command: Command, context: Context) -> Reply:
     key = command.args[0]
     tag = "str"
@@ -201,7 +299,11 @@ async def cmd_set(command: Command, context: Context) -> Reply:
     if nx and xx:
         raise CommandError("NX and XX are mutually exclusive")
     value = _parse_value(tag, command.args[1])
-    if not context.store.set(_owner(context), key, value, ttl=ttl, nx=nx, xx=xx):
+    owner = _owner(context)
+    existing = context.store.get(owner, key)
+    if (not nx or existing is None) and (not xx or existing is not None):
+        _check_write_quota(context, owner, key, value, existing)
+    if not context.store.set(owner, key, value, ttl=ttl, nx=nx, xx=xx):
         return None
     return SimpleString("OK")
 
@@ -321,6 +423,7 @@ async def _adjust(command: Command, context: Context, sign: int) -> Reply:
         value = Value.from_int(vtype, updated)
     except InvalidValue as exc:
         raise CommandError("increment or decrement would overflow") from exc
+    _check_write_quota(context, owner, key, value, existing)
     context.store.update(owner, key, value)
     return updated
 
@@ -347,6 +450,8 @@ async def cmd_subscribe(command: Command, context: Context) -> Reply:
     subscriber = context.subscriber
     replies: list[Reply] = []
     for channel in command.args:
+        if channel not in subscriber.channels:
+            _check_subscription_quota(context, subscriber.owner, 1)
         context.bus.subscribe(subscriber, channel)
         entry: list[Reply] = ["subscribe", channel, subscriber.count]
         replies.append(entry)
@@ -358,6 +463,8 @@ async def cmd_psubscribe(command: Command, context: Context) -> Reply:
     subscriber = context.subscriber
     replies: list[Reply] = []
     for pattern in command.args:
+        if pattern not in subscriber.patterns:
+            _check_subscription_quota(context, subscriber.owner, 1)
         context.bus.psubscribe(subscriber, pattern)
         entry: list[Reply] = ["psubscribe", pattern, subscriber.count]
         replies.append(entry)
@@ -397,6 +504,7 @@ async def cmd_publish(command: Command, context: Context) -> Reply:
     value = _parse_value(tag, command.args[1])
     owner = _owner(context)
     if retain:
+        _check_retain_quota(context, owner, channel, value)
         context.bus.retain(owner, channel, value)
     return context.bus.publish(owner, channel, value)
 
@@ -405,9 +513,18 @@ async def cmd_tenant(command: Command, context: Context) -> Reply:
     subcommand = command.args[0].upper()
     registry = context.tenants
     if subcommand == "CREATE":
-        if len(command.args) != 2:
+        if len(command.args) < 2:
             raise CommandError("syntax error")
-        registry.create(command.args[1])
+        registry.create(command.args[1], Quota.from_dict(_parse_limits(command.args[2:])))
+        return SimpleString("OK")
+    if subcommand == "SET":
+        if len(command.args) != 4:
+            raise CommandError("syntax error")
+        tenant = registry.get(command.args[1])
+        if tenant is None:
+            raise CommandError(f"no such tenant '{command.args[1]}'")
+        limits = _parse_limits(command.args[2:])
+        registry.set_quota(tenant.name, Quota.from_dict({**tenant.quota.to_dict(), **limits}))
         return SimpleString("OK")
     if subcommand == "LIST":
         names: list[Reply] = list(registry.names())
@@ -425,18 +542,30 @@ async def cmd_tenant(command: Command, context: Context) -> Reply:
         tenant = registry.get(command.args[1])
         if tenant is None:
             return None
-        channels, patterns = context.bus.owner_stats(tenant.name)
+        count, store_bytes = context.store.usage(tenant.name)
         info: list[Reply] = [
             "name",
             tenant.name,
             "created_at",
             str(tenant.created_at),
             "keys",
-            context.store.dbsize(tenant.name),
-            "channels",
-            channels,
-            "patterns",
-            patterns,
+            count,
+            "memory",
+            store_bytes + context.bus.usage(tenant.name),
+            "connections",
+            tenant.active_connections,
+            "subscriptions",
+            context.bus.subscription_count(tenant.name),
+            "max_keys",
+            _limit(tenant.quota.max_keys),
+            "max_memory",
+            _limit(tenant.quota.max_memory),
+            "max_connections",
+            _limit(tenant.quota.max_connections),
+            "max_subscriptions",
+            _limit(tenant.quota.max_subscriptions),
+            "max_rate",
+            _limit(tenant.quota.max_rate),
         ]
         return info
     raise CommandError(f"unknown subcommand '{command.args[0]}'")
