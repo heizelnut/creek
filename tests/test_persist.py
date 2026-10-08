@@ -8,6 +8,7 @@ import pytest
 
 from creek.errors import PersistError
 from creek.persist import (
+    Snapshot,
     decode_records,
     encode_blob,
     encode_record,
@@ -67,15 +68,18 @@ def test_decode_stops_at_bad_crc() -> None:
 
 
 def test_snapshot_roundtrip(tmp_path: Path) -> None:
-    entries = [("ns", "k", Value.parse("i32", "42"), None)]
-    retained = [("ns", "ch", _value("last"))]
+    snapshot = Snapshot(
+        entries=[("ns", "k", Value.parse("i32", "42"), None)],
+        retained=[("ns", "ch", _value("last"))],
+        tenants=[("ns", 1000.0)],
+    )
     path = tmp_path / "creek.snapshot"
-    write_snapshot(path, entries, retained)
-    assert read_snapshot(path) == (entries, retained)
+    write_snapshot(path, snapshot)
+    assert read_snapshot(path) == snapshot
 
 
 def test_missing_snapshot_is_empty(tmp_path: Path) -> None:
-    assert read_snapshot(tmp_path / "nope") == ([], [])
+    assert read_snapshot(tmp_path / "nope") == Snapshot([], [], [])
 
 
 def test_unsupported_snapshot_version(tmp_path: Path) -> None:

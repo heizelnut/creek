@@ -17,6 +17,7 @@ from creek.pattern import match
 from creek.protocol import Command, Reply, SimpleString, encode_message
 from creek.pubsub import Bus, Subscriber
 from creek.store import Store
+from creek.tenant import TenantRegistry
 from creek.value import Value, ValueType
 
 
@@ -33,6 +34,7 @@ class Context:
     authenticator: Authenticator | None = None
     store: Store = field(default_factory=Store)
     bus: Bus = field(default_factory=Bus)
+    tenants: TenantRegistry = field(default_factory=TenantRegistry)
     subscriber: Subscriber = field(default_factory=Subscriber)
     pending: list[bytes] = field(default_factory=list)
     close_after_reply: bool = False
@@ -117,6 +119,7 @@ async def cmd_auth(command: Command, context: Context) -> Reply:
     context.bus.remove(context.subscriber)
     context.identity = identity
     context.subscriber.owner = identity.namespace
+    context.tenants.ensure(identity.namespace)
     return SimpleString("OK")
 
 
@@ -398,6 +401,47 @@ async def cmd_publish(command: Command, context: Context) -> Reply:
     return context.bus.publish(owner, channel, value)
 
 
+async def cmd_tenant(command: Command, context: Context) -> Reply:
+    subcommand = command.args[0].upper()
+    registry = context.tenants
+    if subcommand == "CREATE":
+        if len(command.args) != 2:
+            raise CommandError("syntax error")
+        registry.create(command.args[1])
+        return SimpleString("OK")
+    if subcommand == "LIST":
+        names: list[Reply] = list(registry.names())
+        return names
+    if subcommand == "DROP":
+        if len(command.args) != 2:
+            raise CommandError("syntax error")
+        name = command.args[1]
+        context.store.clear(name)
+        context.bus.drop_owner(name)
+        return 1 if registry.drop(name) else 0
+    if subcommand == "INFO":
+        if len(command.args) != 2:
+            raise CommandError("syntax error")
+        tenant = registry.get(command.args[1])
+        if tenant is None:
+            return None
+        channels, patterns = context.bus.owner_stats(tenant.name)
+        info: list[Reply] = [
+            "name",
+            tenant.name,
+            "created_at",
+            str(tenant.created_at),
+            "keys",
+            context.store.dbsize(tenant.name),
+            "channels",
+            channels,
+            "patterns",
+            patterns,
+        ]
+        return info
+    raise CommandError(f"unknown subcommand '{command.args[0]}'")
+
+
 async def cmd_pubsub(command: Command, context: Context) -> Reply:
     subcommand = command.args[0].upper()
     owner = _owner(context)
@@ -443,3 +487,4 @@ register("PSUBSCRIBE", cmd_psubscribe, min_args=1, max_args=None, scope="subscri
 register("UNSUBSCRIBE", cmd_unsubscribe, max_args=None, scope="subscribe")
 register("PUNSUBSCRIBE", cmd_punsubscribe, max_args=None, scope="subscribe")
 register("PUBSUB", cmd_pubsub, min_args=1, max_args=None, scope="read")
+register("TENANT", cmd_tenant, min_args=1, max_args=None, scope="admin")

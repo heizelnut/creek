@@ -157,6 +157,7 @@ creek/
 │   ├── pattern.py      glob matching (M1b)
 │   ├── pubsub.py       subscriptions + fanout (M2)
 │   ├── persist.py      WAL + snapshots (M3)
+│   ├── tenant.py       tenant registry (M6a)
 │   └── client.py       async client library (M5)
 ├── tests/          test_protocol.py test_commands.py test_auth.py
 │                   test_cli.py test_server.py test_value.py
@@ -234,7 +235,7 @@ Case-insensitive command names, whitespace-separated args. Typed values are give
 ### Admin
 | Command | Notes |
 |---|---|
-| `INFO [section]`, `FLUSHALL`, `COMMAND [COUNT]` | Operational. |
+| `INFO [section]`, `FLUSHALL`, `COMMAND [COUNT]`, `TENANT …` | Operational. |
 
 Notes:
 - The command registry is data-driven: write an `async def` handler and call
@@ -276,9 +277,10 @@ Auth file schema:
 ### Path to multitenancy
 
 Today a "namespace" is a scoping prefix on keys and channels, not a hard isolation boundary: one
-process, one store, one WAL, coarse ACLs. The data model is already tenant-ready — every entry
-carries its owner and every WAL record is tagged — so **M6** (§17) can promote namespaces to real
-tenants (lifecycle, quotas, per-tenant metrics/persistence) without a format change.
+process, one store, one WAL, coarse ACLs. The data model is tenant-ready — every entry carries its
+owner and every WAL record is tagged — and **M6a** (§17) now makes tenants explicit
+(`TENANT …`, auto-provisioned on `AUTH`, journaled and snapshotted). Quotas and per-tenant
+observability/persistence are **M6b/M6c**.
 
 ## 9. Transports and framing
 
@@ -444,13 +446,12 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
   *(implemented)*
 - **M5 — Hardening:** browser load/perf pages; fuzz tests; async client library. *(implemented)*
 - **M6 — Multitenancy:** promote namespaces to first-class tenants with lifecycle and limits.
-  - Admin API: `TENANT CREATE|LIST|DROP|INFO` (admin scope), journaled.
-  - Quotas: keys, approximate memory, connections, subscriptions, and command rate per tenant;
-    quota failures return a `QUOTA` error.
-  - Per-tenant observability (`INFO tenant`, counters) and optional per-tenant WAL/snapshot files
-    (the data model already tags every entry and WAL record with its owner).
-  - Isolation hardening: key/channel length limits, no cross-tenant enumeration, audit logging of
-    admin actions. Requires `--auth-file`.
+  - **M6a — Registry + admin API:** `TENANT CREATE|LIST|DROP|INFO` (admin scope), auto-provisioned
+    when a client authenticates, journaled and snapshotted. *(implemented)*
+  - **M6b — Quotas:** keys, approximate memory, connections, subscriptions, and command rate per
+    tenant; quota failures return a `QUOTA` error.
+  - **M6c — Observability + hardening:** per-tenant counters (`INFO tenant`), key/channel length
+    limits, no cross-tenant enumeration, audit logging of admin actions. Requires `--auth-file`.
 - **M7 — Clustering (multi-phase; exploratory):** v1 is single-node and nothing in it assumes a
   cluster.
   - **M7a — Read replicas:** one writer, N followers streaming the WAL; `ROLE` / `INFO replication`;
@@ -516,6 +517,11 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — Tenants (M6a).** Tenants are explicit records (`creek.tenant`) with a lifecycle;
+  `TENANT CREATE|LIST|DROP|INFO` is admin-scoped. Tenants are auto-provisioned when a client
+  authenticates (so existing auth files keep working) and are journaled + snapshotted. `TENANT
+  DROP` clears keys, channels, and retained values, then removes the record; a namespace can be
+  re-provisioned by authenticating again (DROP is "forget", not a permanent ban).
 - **2026-10-06 — Namespace isolation is pinned by tests.** `tests/test_tenancy.py` asserts that
   keys, channels, enumeration, flushing, retained messages, and persisted records are scoped by
   owner, and that ACLs are per-identity (not per-namespace). `AUTH` moves the subscriber to the new

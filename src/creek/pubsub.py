@@ -103,6 +103,25 @@ class Bus:
         for pattern in list(subscriber.patterns):
             self.punsubscribe(subscriber, pattern)
 
+    def drop_owner(self, owner: str) -> None:
+        """Remove every channel, pattern, and retained value for ``owner``."""
+        for key in [key for key in self._channels if key[0] == owner]:
+            for subscriber in list(self._channels[key]):
+                subscriber.channels.discard(key[1])
+            del self._channels[key]
+        for key in [key for key in self._patterns if key[0] == owner]:
+            for subscriber in list(self._patterns[key]):
+                subscriber.patterns.discard(key[1])
+            del self._patterns[key]
+        for key in [key for key in self._retained if key[0] == owner]:
+            del self._retained[key]
+
+    def owner_stats(self, owner: str) -> tuple[int, int]:
+        """Return ``(channel_count, pattern_count)`` for ``owner``."""
+        channels = sum(1 for (channel_owner, _) in self._channels if channel_owner == owner)
+        patterns = sum(1 for (pattern_owner, _) in self._patterns if pattern_owner == owner)
+        return channels, patterns
+
     def publish(self, owner: str, channel: str, value: Value) -> int:
         """Deliver to channel and pattern subscribers; return the number reached."""
         frame = encode_message(channel, value.type.tag, value.text())

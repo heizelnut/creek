@@ -18,7 +18,7 @@ import os
 import struct
 import time
 import zlib
-from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -30,10 +30,20 @@ SNAPSHOT_VERSION = 1
 _FRAME = struct.Struct("<II")
 EntryRecord = tuple[str, str, Value, float | None]
 RetainedRecord = tuple[str, str, Value]
+TenantRecord = tuple[str, float]
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """A full dump of server state."""
+
+    entries: list[EntryRecord]
+    retained: list[RetainedRecord]
+    tenants: list[TenantRecord]
 
 
 class Journal(Protocol):
-    """What the store and bus call to record mutations."""
+    """What the store, bus, and tenant registry call to record mutations."""
 
     def set(self, owner: str, key: str, value: Value, expires_at: float | None) -> None: ...
 
@@ -42,6 +52,10 @@ class Journal(Protocol):
     def flush(self, owner: str) -> None: ...
 
     def retain(self, owner: str, channel: str, value: Value) -> None: ...
+
+    def tenant_create(self, name: str, created_at: float) -> None: ...
+
+    def tenant_drop(self, name: str) -> None: ...
 
 
 def encode_record(record: dict[str, Any]) -> bytes:
@@ -175,6 +189,12 @@ class Wal:
             {"op": "retain", "owner": owner, "channel": channel, "data": encode_blob(value)}
         )
 
+    def tenant_create(self, name: str, created_at: float) -> None:
+        self.append({"op": "tenant_create", "name": name, "created_at": created_at})
+
+    def tenant_drop(self, name: str) -> None:
+        self.append({"op": "tenant_drop", "name": name})
+
     async def close(self) -> None:
         """Drain the queue, fsync, and close the file."""
         if self._task is not None:
@@ -191,21 +211,20 @@ class Wal:
         self._file.close()
 
 
-def write_snapshot(
-    path: Path,
-    entries: Iterable[EntryRecord],
-    retained: Iterable[RetainedRecord],
-) -> None:
+def write_snapshot(path: Path, snapshot: Snapshot) -> None:
     """Write a versioned snapshot atomically (temp file -> fsync -> rename)."""
     document = {
         "version": SNAPSHOT_VERSION,
+        "tenants": [
+            {"name": name, "created_at": created_at} for name, created_at in snapshot.tenants
+        ],
         "entries": [
             {"owner": owner, "key": key, "data": encode_blob(value), "expires_at": expires_at}
-            for owner, key, value, expires_at in entries
+            for owner, key, value, expires_at in snapshot.entries
         ],
         "retained": [
             {"owner": owner, "channel": channel, "data": encode_blob(value)}
-            for owner, channel, value in retained
+            for owner, channel, value in snapshot.retained
         ],
     }
     payload = json.dumps(document).encode("utf-8")
@@ -218,10 +237,10 @@ def write_snapshot(
     _fsync_dir(path.parent)
 
 
-def read_snapshot(path: Path) -> tuple[list[EntryRecord], list[RetainedRecord]]:
-    """Load a snapshot; a missing file yields empty lists."""
+def read_snapshot(path: Path) -> Snapshot:
+    """Load a snapshot; a missing file yields an empty snapshot."""
     if not path.exists():
-        return [], []
+        return Snapshot([], [], [])
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -237,15 +256,18 @@ def read_snapshot(path: Path) -> tuple[list[EntryRecord], list[RetainedRecord]]:
         (item["owner"], item["channel"], decode_blob(item["data"]))
         for item in document.get("retained", [])
     ]
-    return entries, retained
+    tenants: list[TenantRecord] = [
+        (item["name"], item["created_at"]) for item in document.get("tenants", [])
+    ]
+    return Snapshot(entries, retained, tenants)
 
 
-def load(data_dir: Path) -> tuple[list[EntryRecord], list[RetainedRecord], list[dict[str, Any]]]:
+def load(data_dir: Path) -> tuple[Snapshot, list[dict[str, Any]]]:
     """Read the snapshot and WAL records for recovery."""
-    entries, retained = read_snapshot(data_dir / "creek.snapshot")
+    snapshot = read_snapshot(data_dir / "creek.snapshot")
     wal_path = data_dir / "creek.wal"
     records = decode_records(wal_path.read_bytes()) if wal_path.exists() else []
-    return entries, retained, records
+    return snapshot, records
 
 
 def _fsync_dir(path: Path) -> None:
@@ -259,6 +281,7 @@ def _fsync_dir(path: Path) -> None:
 __all__ = [
     "SNAPSHOT_VERSION",
     "Journal",
+    "Snapshot",
     "Wal",
     "decode_blob",
     "decode_records",

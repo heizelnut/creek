@@ -281,6 +281,10 @@ Notes:
 | `INFO [section]` | | bulk text |
 | `FLUSHALL` | | `OK` (admin only) |
 | `COMMAND [COUNT]` | | array of names / integer |
+| `TENANT CREATE\|LIST\|DROP\|INFO [name]` | | `OK` / names / `1` / `0` / info |
+
+`TENANT` is admin-only. Tenants are auto-provisioned when a client authenticates into a namespace;
+`TENANT DROP` clears the tenant's keys, channels, and retained values and removes the record.
 
 ---
 
@@ -310,4 +314,4 @@ Planned additions (see `AGENTS.md` §17):
 
 - A `HELLO` handshake to negotiate protocol version and capabilities.
 - Cluster redirection (`MOVED`/`ASK`) and `CLUSTER` introspection for M7b.
-- Tenant administration commands (`TENANT …`) for M6.
+- Tenant administration commands (`TENANT …`) — implemented in M6a.

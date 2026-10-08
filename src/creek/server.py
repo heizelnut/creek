@@ -28,10 +28,11 @@ from creek import persist
 from creek.auth import ANONYMOUS, Authenticator
 from creek.commands import Context, execute
 from creek.errors import CommandError, ProtocolError
-from creek.persist import Wal, decode_blob, write_snapshot
+from creek.persist import Snapshot, Wal, decode_blob, write_snapshot
 from creek.protocol import Command, Error, Incomplete, Reply, encode, parse
 from creek.pubsub import Bus, Subscriber
 from creek.store import Store
+from creek.tenant import TenantRegistry
 
 log = logging.getLogger("creek.server")
 
@@ -71,6 +72,7 @@ class Server:
         self.authenticator = Authenticator.from_file(config.auth_file) if config.auth_file else None
         self.store = Store()
         self.bus = Bus()
+        self.tenants = TenantRegistry()
         self.journal: Wal | None = None
         self._snapshot_task: asyncio.Task[None] | None = None
         if config.data_dir is not None:
@@ -79,6 +81,7 @@ class Server:
             self.journal = Wal(config.data_dir / "creek.wal", fsync=config.fsync)
             self.store.journal = self.journal
             self.bus.journal = self.journal
+            self.tenants.journal = self.journal
         self._tcp: asyncio.Server | None = None
         self._ws: WsServer | None = None
         self._stop = asyncio.Event()
@@ -136,19 +139,22 @@ class Server:
             await self.journal.close()
 
     def _recover(self, data_dir: Path) -> None:
-        entries, retained, records = persist.load(data_dir)
-        for owner, key, value, expires_at in entries:
+        snapshot, records = persist.load(data_dir)
+        for owner, key, value, expires_at in snapshot.entries:
             self.store.restore(owner, key, value, expires_at)
-        for owner, channel, value in retained:
+        for owner, channel, value in snapshot.retained:
             self.bus.restore_retained(owner, channel, value)
+        for name, created_at in snapshot.tenants:
+            self.tenants.restore(name, created_at)
         for record in records:
             self._apply(record)
-        if entries or retained or records:
+        if snapshot.entries or snapshot.retained or snapshot.tenants or records:
             log.info(
                 "recovered",
                 extra={
-                    "entries": len(entries),
-                    "retained": len(retained),
+                    "entries": len(snapshot.entries),
+                    "retained": len(snapshot.retained),
+                    "tenants": len(snapshot.tenants),
                     "wal_records": len(records),
                 },
             )
@@ -166,6 +172,13 @@ class Server:
             self.bus.restore_retained(
                 record["owner"], record["channel"], decode_blob(record["data"])
             )
+        elif op == "tenant_create":
+            self.tenants.restore(record["name"], record["created_at"])
+        elif op == "tenant_drop":
+            name = record["name"]
+            self.tenants.drop(name)
+            self.store.clear(name)
+            self.bus.drop_owner(name)
         else:
             log.warning("ignoring unknown WAL record", extra={"op": op})
 
@@ -175,9 +188,12 @@ class Server:
             return
         journal = self.journal
         mutations = journal.mutations if journal is not None else 0
-        entries = self.store.entries()
-        retained = self.bus.retained_entries()
-        await asyncio.to_thread(write_snapshot, data_dir / "creek.snapshot", entries, retained)
+        snapshot = Snapshot(
+            entries=self.store.entries(),
+            retained=self.bus.retained_entries(),
+            tenants=self.tenants.entries(),
+        )
+        await asyncio.to_thread(write_snapshot, data_dir / "creek.snapshot", snapshot)
         if journal is not None:
             await journal.compact(mutations)
 
@@ -190,12 +206,15 @@ class Server:
         anonymous = self.authenticator is None or self.authenticator.allow_anonymous
         identity = ANONYMOUS if anonymous else None
         namespace = identity.namespace if identity is not None else "default"
+        if identity is not None:
+            self.tenants.ensure(identity.namespace)
         return Context(
             peer=peer,
             identity=identity,
             authenticator=self.authenticator,
             store=self.store,
             bus=self.bus,
+            tenants=self.tenants,
             subscriber=Subscriber(namespace),
         )
 
