@@ -6,6 +6,7 @@ Nothing else needs to change; both transports pick it up automatically.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -17,8 +18,10 @@ from creek.pattern import match
 from creek.protocol import Command, Reply, SimpleString, encode_message
 from creek.pubsub import Bus, Subscriber
 from creek.store import Store
-from creek.tenant import Quota, TenantRegistry
+from creek.tenant import Quota, Tenant, TenantRegistry
 from creek.value import Value, ValueType
+
+log = logging.getLogger("creek.audit")
 
 
 @dataclass(slots=True)
@@ -78,7 +81,10 @@ async def execute(command: Command, context: Context) -> Reply:
     if count < spec.min_args or (spec.max_args is not None and count > spec.max_args):
         raise CommandError(f"wrong number of arguments for '{command.name.lower()}'")
     _check_access(spec.scope, context)
+    _check_lengths(command)
     _check_rate(context)
+    if spec.scope == "admin":
+        _audit(command, context)
     return await spec.handler(command, context)
 
 
@@ -124,7 +130,10 @@ async def cmd_auth(command: Command, context: Context) -> Reply:
     context.tenants.ensure(identity.namespace)
     previous = context.quota_tenant
     if previous != identity.namespace and not context.tenants.acquire(identity.namespace):
-        raise _quota(f"connection quota exceeded for tenant '{identity.namespace}'")
+        raise _quota(
+            context.tenants.get(identity.namespace),
+            f"connection quota exceeded for tenant '{identity.namespace}'",
+        )
     if previous is not None and previous != identity.namespace:
         context.tenants.release(previous)
     context.quota_tenant = identity.namespace
@@ -141,6 +150,11 @@ async def cmd_command(command: Command, context: Context) -> Reply:
 
 
 async def cmd_info(command: Command, context: Context) -> Reply:
+    section = command.args[0].lower() if command.args else "all"
+    if section in ("tenant", "tenants"):
+        return _tenant_report(context)
+    if section not in ("all", "default", "server"):
+        return ""
     return "\r\n".join(
         [
             "# Server",
@@ -187,12 +201,81 @@ _LIMIT_FIELDS = {
 }
 
 
-def _quota(message: str) -> CommandError:
+def _quota(tenant: Tenant | None, message: str) -> CommandError:
+    if tenant is not None:
+        tenant.quota_rejections += 1
     return CommandError(message, code="QUOTA")
 
 
 def _limit(value: int | float | None) -> int:
     return -1 if value is None else int(value)
+
+
+# --- length limits + audit ----------------------------------------------
+
+MAX_KEY_BYTES = 1024
+MAX_CHANNEL_BYTES = 1024
+
+_KEY_COMMANDS = frozenset(
+    {"SET", "GET", "MGET", "DEL", "EXISTS", "TYPE", "EXPIRE", "TTL", "INCR", "DECR"}
+)
+_MULTI_KEY_COMMANDS = frozenset({"MGET", "DEL", "EXISTS"})
+_CHANNEL_COMMANDS = frozenset({"PUBLISH", "SUBSCRIBE", "PSUBSCRIBE", "UNSUBSCRIBE", "PUNSUBSCRIBE"})
+_MULTI_CHANNEL_COMMANDS = frozenset({"SUBSCRIBE", "PSUBSCRIBE", "UNSUBSCRIBE", "PUNSUBSCRIBE"})
+
+
+def _check_key(key: str) -> None:
+    if len(key.encode("utf-8")) > MAX_KEY_BYTES:
+        raise CommandError(f"key too long (max {MAX_KEY_BYTES} bytes)")
+
+
+def _check_channel(channel: str) -> None:
+    if len(channel.encode("utf-8")) > MAX_CHANNEL_BYTES:
+        raise CommandError(f"channel too long (max {MAX_CHANNEL_BYTES} bytes)")
+
+
+def _check_lengths(command: Command) -> None:
+    if command.name in _KEY_COMMANDS:
+        keys = command.args if command.name in _MULTI_KEY_COMMANDS else command.args[:1]
+        for key in keys:
+            _check_key(key)
+    elif command.name in _CHANNEL_COMMANDS:
+        channels = command.args if command.name in _MULTI_CHANNEL_COMMANDS else command.args[:1]
+        for channel in channels:
+            _check_channel(channel)
+
+
+def _audit(command: Command, context: Context) -> None:
+    identity = context.identity
+    actor = identity.id if identity is not None else "anonymous"
+    log.info(
+        "admin command %s by %s",
+        command.name,
+        actor,
+        extra={
+            "actor": actor,
+            "namespace": identity.namespace if identity is not None else "default",
+            "command": command.name,
+            "command_args": list(command.args),
+        },
+    )
+
+
+def _tenant_report(context: Context) -> str:
+    lines = ["# Tenants"]
+    for name in context.tenants.names():
+        tenant = context.tenants.get(name)
+        count, store_bytes = context.store.usage(name)
+        channels, patterns = context.bus.owner_stats(name)
+        lines.append(
+            f"{name} keys={count} memory={store_bytes + context.bus.usage(name)} "
+            f"connections={tenant.active_connections if tenant else 0} "
+            f"subscriptions={context.bus.subscription_count(name)} "
+            f"channels={channels} patterns={patterns} "
+            f"commands={tenant.commands if tenant else 0} "
+            f"rejected={tenant.quota_rejections if tenant else 0}"
+        )
+    return "\r\n".join(lines)
 
 
 def _entry_size(key: str, value: Value) -> int:
@@ -219,8 +302,12 @@ def _parse_limits(args: Sequence[str]) -> dict[str, int | float | None]:
 
 def _check_rate(context: Context) -> None:
     owner = _owner(context)
+    tenant = context.tenants.get(owner)
+    if tenant is None:
+        return
+    tenant.commands += 1
     if not context.tenants.allow(owner):
-        raise _quota(f"rate quota exceeded for tenant '{owner}'")
+        raise _quota(tenant, f"rate quota exceeded for tenant '{owner}'")
 
 
 def _check_write_quota(
@@ -234,14 +321,14 @@ def _check_write_quota(
         return
     count, store_bytes = context.store.usage(owner)
     if quota.max_keys is not None and existing is None and count >= quota.max_keys:
-        raise _quota(f"key quota exceeded for tenant '{owner}'")
+        raise _quota(tenant, f"key quota exceeded for tenant '{owner}'")
     if quota.max_memory is not None:
         total = store_bytes + context.bus.usage(owner)
         delta = _entry_size(key, value)
         if existing is not None:
             delta -= _entry_size(key, existing)
         if total + delta > quota.max_memory:
-            raise _quota(f"memory quota exceeded for tenant '{owner}'")
+            raise _quota(tenant, f"memory quota exceeded for tenant '{owner}'")
 
 
 def _check_retain_quota(context: Context, owner: str, channel: str, value: Value) -> None:
@@ -254,7 +341,7 @@ def _check_retain_quota(context: Context, owner: str, channel: str, value: Value
     if previous is not None:
         delta -= _entry_size(channel, previous)
     if total + delta > tenant.quota.max_memory:
-        raise _quota(f"memory quota exceeded for tenant '{owner}'")
+        raise _quota(tenant, f"memory quota exceeded for tenant '{owner}'")
 
 
 def _check_subscription_quota(context: Context, owner: str, adding: int) -> None:
@@ -263,7 +350,7 @@ def _check_subscription_quota(context: Context, owner: str, adding: int) -> None
         return
     current = context.bus.subscription_count(owner)
     if current + adding > tenant.quota.max_subscriptions:
-        raise _quota(f"subscription quota exceeded for tenant '{owner}'")
+        raise _quota(tenant, f"subscription quota exceeded for tenant '{owner}'")
 
 
 async def cmd_set(command: Command, context: Context) -> Reply:
@@ -556,6 +643,12 @@ async def cmd_tenant(command: Command, context: Context) -> Reply:
             tenant.active_connections,
             "subscriptions",
             context.bus.subscription_count(tenant.name),
+            "commands",
+            tenant.commands,
+            "rejected",
+            tenant.quota_rejections,
+            "connections_opened",
+            tenant.connections_opened,
             "max_keys",
             _limit(tenant.quota.max_keys),
             "max_memory",

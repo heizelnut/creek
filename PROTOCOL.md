@@ -291,6 +291,12 @@ Notes:
 `QUOTA` error. Memory is approximated as `len(key) + len(value blob)` per entry plus retained
 values.
 
+`INFO tenant` returns a one-line report per tenant (keys, memory, connections, subscriptions, and
+counters). Admin-scoped commands are written to the server's audit log.
+
+Keys and channels are limited to 1024 bytes; longer values return `ERR key too long` or
+`ERR channel too long`.
+
 ---
 
 ## 7. Patterns

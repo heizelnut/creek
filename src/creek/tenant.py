@@ -59,6 +59,9 @@ class Tenant:
     created_at: float
     quota: Quota = field(default_factory=Quota)
     active_connections: int = 0
+    commands: int = 0
+    quota_rejections: int = 0
+    connections_opened: int = 0
     _tokens: float = 0.0
     _rate_last: float = -1.0
 
@@ -146,6 +149,7 @@ class TenantRegistry:
         if limit is not None and tenant.active_connections >= limit:
             return False
         tenant.active_connections += 1
+        tenant.connections_opened += 1
         return True
 
     def release(self, name: str) -> None:

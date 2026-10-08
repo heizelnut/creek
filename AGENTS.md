@@ -264,6 +264,8 @@ boundary in v1.
 - Tenants carry optional quotas (M6b): keys, approximate memory, connections, subscriptions, and
   command rate. Exceeding one returns a `QUOTA` error. Memory is approximated as
   `len(key) + len(value blob)` per entry plus retained values.
+- Keys and channels are capped at 1024 bytes (`MAX_KEY_BYTES` / `MAX_CHANNEL_BYTES`), and
+  admin-scoped commands are written to the `creek.audit` logger with the acting identity (M6c).
 
 Auth file schema:
 
@@ -454,7 +456,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
   - **M6b — Quotas:** keys, approximate memory, connections, subscriptions, and command rate per
     tenant; quota failures return a `QUOTA` error. *(implemented)*
   - **M6c — Observability + hardening:** per-tenant counters (`INFO tenant`), key/channel length
-    limits, no cross-tenant enumeration, audit logging of admin actions. Requires `--auth-file`.
+    limits, no cross-tenant enumeration, audit logging of admin actions. *(implemented)*
 - **M7 — Clustering (multi-phase; exploratory):** v1 is single-node and nothing in it assumes a
   cluster.
   - **M7a — Read replicas:** one writer, N followers streaming the WAL; `ROLE` / `INFO replication`;
@@ -520,6 +522,12 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — Tenant hardening (M6c).** Per-tenant counters (`commands`, `quota_rejections`,
+  `connections_opened`) surface in `TENANT INFO`, and `INFO tenant` prints a one-line report per
+  tenant. Keys and channels are capped at 1024 bytes. Admin-scoped commands are logged to the
+  `creek.audit` logger with `actor` / `namespace` / `command` / `command_args` fields (the actor is
+  also in the message so the default log format shows it). Length limits and audit are centralized
+  in `execute` (`_check_lengths`, `_audit`), so handlers stay unchanged.
 - **2026-10-06 — Tenant quotas (M6b).** Optional per-tenant limits: `max_keys`, `max_memory`,
   `max_connections`, `max_subscriptions`, and `max_rate` (a token bucket). Memory is an
   **approximation**: `len(key) + len(value.to_bytes())` per key plus retained channel values, not
