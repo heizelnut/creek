@@ -12,6 +12,8 @@ from creek.plc.modbus import (
 )
 from creek.plc.modbus_server import ModbusSimulator
 from creek.plc.poller import Poller, apply_scale
+from creek.plc.s7 import S7Address, S7Driver, S7Error
+from creek.plc.s7 import parse_address as parse_s7_address
 from creek.plc.tags import Connection, PlcConfig, PlcConfigError, Tag
 
 __all__ = [
@@ -25,9 +27,13 @@ __all__ = [
     "PlcConfigError",
     "PlcDriver",
     "Poller",
+    "S7Address",
+    "S7Driver",
+    "S7Error",
     "Tag",
     "apply_scale",
     "decode_registers",
     "encode_registers",
     "parse_address",
+    "parse_s7_address",
 ]

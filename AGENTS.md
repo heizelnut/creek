@@ -358,11 +358,13 @@ Prefer the standard library. Current external dependencies:
 | Lint/format | `ruff` | dev |
 | Type checking | `mypy` | dev |
 | Modbus cross-check | `pymodbus` | dev (tests only) |
+| Siemens S7 transport | `python-snap7` | required (needs the native `libsnap7`) |
 
 `f16`/`f8` are implemented in-tree (`struct` + custom E4M3), as are the Modbus/TCP client and its
 simulator. `pymodbus` is a **dev-only** dependency used to cross-check our client against an
-independent implementation; the shipped code has no Modbus dependency. Do not add an ORM, a web
-framework, or a logging framework; stdlib `logging` is the logging standard.
+independent implementation; the shipped code has no Modbus dependency. S7 uses `python-snap7`, which
+requires the native snap7 library to be installed on the host. Do not add an ORM, a web framework, or
+a logging framework; stdlib `logging` is the logging standard.
 `aiohttp`/`uvicorn`/FastAPI are out of scope: Creek speaks its own protocol, not HTTP APIs.
 
 Dev dependencies are listed twice — `[project.optional-dependencies].dev` for pip and
@@ -498,7 +500,8 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
     `Poller` that mirrors tags into the store (non-journaled) and publishes changes. *(implemented)*
   - **M9b — Modbus/TCP driver:** coils/discrete/input/holding registers, read + write, batching,
     an in-tree simulator, and a `pymodbus` cross-check. *(implemented)*
-  - **M9c — S7comm driver:** DB/I/Q/M via TPKT/COTP/S7 read-var and write-var.
+  - **M9c — S7 driver:** DB/I/Q/M read/write via `python-snap7` (requires the native snap7
+    library). *(implemented)*
   - **M9d — Manager + commands:** `--plc-config` wiring, `PLC` admin commands, write audit.
   - **M9e — Quality/staleness, reconnect/backoff, per-connection metrics.**
 
@@ -558,6 +561,12 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — S7 driver (M9c).** Built on **`python-snap7`** (native `libsnap7` required) rather
+  than an in-tree S7comm implementation: it is battle-tested against real S7-300/400/1200/1500, and
+  S7comm is fiddly to get right. `python-snap7` is synchronous, so calls are offloaded with
+  `asyncio.to_thread` and serialized per connection; reads are grouped by `(area, db)` into one span
+  request. Addresses: `DB<n>.DB[XBWD]<offset>[.<bit>]` and `[IQM][XBWD]<offset>[.<bit>]`.
+  S7-1200/1500 needs PUT/GET enabled and non-optimized DBs; symbolic/S7comm-plus is out of scope.
 - **2026-10-06 — Modbus/TCP driver (M9b).** Implemented **in-tree** (no dependency): MBAP
   framing, function codes 01/02/03/04/05/06/0F/10, coils/discrete inputs and input/holding
   registers, contiguous-run batching, and configurable word order for 32-bit values. Addresses are

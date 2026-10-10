@@ -84,6 +84,7 @@ name = "creek"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "python-snap7" },
     { name = "websockets" },
 ]
 
@@ -111,6 +112,7 @@ requires-dist = [
     { name = "pymodbus", marker = "extra == 'dev'", specifier = ">=3.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "python-snap7", specifier = ">=3.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7" },
     { name = "websockets", specifier = ">=13" },
 ]
@@ -370,6 +372,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/43/7c/d36d04db312ecf4298932ef77e6e4a9e8ad017906e24e34f0b0c361a2473/pytest_asyncio-1.4.0.tar.gz", hash = "sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42", size = 58514, upload-time = "2026-05-26T09:56:04.083Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/03/e2/08a497ef684b88559c9cc5f4ad53a37e7b99e727094a86d6ea32536d5d3c/pytest_asyncio-1.4.0-py3-none-any.whl", hash = "sha256:933ca923a23075a87fb7070c0ec272a6848489824d887c85c812670932835aa1", size = 16930, upload-time = "2026-05-26T09:56:02.576Z" },
+]
+
+[[package]]
+name = "python-snap7"
+version = "3.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/af/c9600d0de339469815284a1c3657a9376e17f8a5ff81c3d993f2682b82c3/python_snap7-3.2.1.tar.gz", hash = "sha256:15748f8423e3726457f6c4d0202aabde4ad65f2b809c2c1e7ee4f2f776509c2b", size = 295424, upload-time = "2026-10-04T07:18:34.192Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/19/dd8ae9e240eddbadeee9e3b68115b28766e3ac25c755ae2af7c6cc87a566/python_snap7-3.2.1-py3-none-any.whl", hash = "sha256:05d65110169c3ef2edea2aaeb23be598527c46877d5546ee0a7e61a7e37ab198", size = 156107, upload-time = "2026-10-04T07:18:32.612Z" },
 ]
 
 [[package]]

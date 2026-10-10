@@ -1,9 +1,9 @@
 # PLC connectivity — design sketch
 
-> **Status: M9a/M9b implemented.** This describes how Creek centralizes PLC state for a SCADA
-> system over **Modbus/TCP** and **Siemens S7**. The tag model, driver interface, poller, and the
-> in-tree Modbus/TCP driver + simulator exist (`src/creek/plc/`); the S7comm driver is next. See
-> `AGENTS.md` §17 (M9).
+> **Status: M9a–M9c implemented.** This describes how Creek centralizes PLC state for a SCADA
+> system over **Modbus/TCP** and **Siemens S7**. The tag model, driver interface, poller, the
+> in-tree Modbus/TCP driver + simulator, and the S7 driver (via `python-snap7`) exist
+> (`src/creek/plc/`). See `AGENTS.md` §17 (M9).
 
 ## 1. The goal
 
@@ -95,8 +95,11 @@ into contiguous runs (≤125 registers / ≤2000 bits) for efficiency.
 Targets: **S7-300/400**, and **S7-1200/1500** with PUT/GET enabled and **non-optimized** DBs.
 Symbolic/optimized access needs S7comm-plus, which is undocumented and out of scope.
 
-The driver speaks TPKT (RFC 1006) → COTP connection → S7 Job: `Setup Communication`, `Read Var`,
-`Write Var`, batching multiple items per request.
+The driver is built on **`python-snap7`** (which wraps the native snap7 library and speaks
+TPKT/COTP/S7). `python-snap7` is synchronous, so every device call is offloaded with
+`asyncio.to_thread` and serialized by a per-connection lock; reads are grouped by `(area, db)` into
+one span request per group. S7 is big-endian; bit writes are read-modify-write so neighbouring bits
+are preserved.
 
 ## 6. Quality, staleness, and timestamps
 
@@ -115,9 +118,9 @@ timestamp, or a structured metadata map. **Decision pending** — see §8.
 
 ## 8. Open questions
 
-1. **Dependencies** — implement Modbus/TCP and S7comm in-tree (stdlib only), or use `pymodbus` and
-   `python-snap7` (the latter needs the native snap7 library)? Recommendation: in-tree Modbus (it
-   is simple); in-tree minimal S7comm to avoid the native dependency, flagged as the riskier piece.
+1. **Dependencies** — *resolved*: Modbus/TCP is in-tree (no dependency); S7 uses `python-snap7`
+   (which requires the native `libsnap7` — `brew install snap7`, `apt install libsnap7`, …).
+   `pymodbus` is a dev-only cross-check.
 2. **Target S7 models** — S7-300/400 only, or also S7-1200/1500 with PUT/GET + non-optimized DBs?
 3. **Control vs monitor** — start read-only, then enable writes per tag, or support writes from day
    one? (Recommendation: read-only first, writes behind `writable` + audit.)
@@ -130,6 +133,6 @@ timestamp, or a structured metadata map. **Decision pending** — see §8.
 |---|---|
 | **M9a** | Tag map, driver interface, poller *(implemented)* |
 | **M9b** | Modbus/TCP driver + simulator + pymodbus cross-check *(implemented)* |
-| **M9c** | S7comm driver + protocol tests |
+| **M9c** | S7 driver via `python-snap7` + tests against a snap7 server *(implemented)* |
 | **M9d** | Manager + `--plc-config` wiring; `PLC` admin commands; write audit |
 | **M9e** | Quality/staleness, reconnect/backoff, per-connection metrics |
