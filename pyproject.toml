@@ -19,6 +19,7 @@ creek = "creek.cli:main"
 [project.optional-dependencies]
 dev = [
     "mypy>=1.11",
+    "pymodbus>=3.9",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.7",
@@ -30,6 +31,7 @@ dev = [
 [dependency-groups]
 dev = [
     "mypy>=1.11",
+    "pymodbus>=3.9",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.7",

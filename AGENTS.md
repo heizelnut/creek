@@ -357,10 +357,13 @@ Prefer the standard library. Current external dependencies:
 | Testing | `pytest`, `pytest-asyncio` | dev |
 | Lint/format | `ruff` | dev |
 | Type checking | `mypy` | dev |
+| Modbus cross-check | `pymodbus` | dev (tests only) |
 
-`f16`/`f8` are implemented in-tree (`struct` + custom E4M3). Do not add an ORM, a web framework, or
-a logging framework; stdlib `logging` is the logging standard. `aiohttp`/`uvicorn`/FastAPI are out
-of scope: Creek speaks its own protocol, not HTTP APIs.
+`f16`/`f8` are implemented in-tree (`struct` + custom E4M3), as are the Modbus/TCP client and its
+simulator. `pymodbus` is a **dev-only** dependency used to cross-check our client against an
+independent implementation; the shipped code has no Modbus dependency. Do not add an ORM, a web
+framework, or a logging framework; stdlib `logging` is the logging standard.
+`aiohttp`/`uvicorn`/FastAPI are out of scope: Creek speaks its own protocol, not HTTP APIs.
 
 Dev dependencies are listed twice — `[project.optional-dependencies].dev` for pip and
 `[dependency-groups].dev` for uv — because pip cannot read PEP 735 groups. `uv.lock` is committed.
@@ -493,7 +496,8 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 - **M9 — PLC connectivity:** centralize PLC state for SCADA (see `PLC.md`).
   - **M9a — Tag map + poller:** `Connection`/`Tag`/`PlcConfig`, the `PlcDriver` interface, and a
     `Poller` that mirrors tags into the store (non-journaled) and publishes changes. *(implemented)*
-  - **M9b — Modbus/TCP driver:** coils/discrete/input/holding registers, read + write, batching.
+  - **M9b — Modbus/TCP driver:** coils/discrete/input/holding registers, read + write, batching,
+    an in-tree simulator, and a `pymodbus` cross-check. *(implemented)*
   - **M9c — S7comm driver:** DB/I/Q/M via TPKT/COTP/S7 read-var and write-var.
   - **M9d — Manager + commands:** `--plc-config` wiring, `PLC` admin commands, write audit.
   - **M9e — Quality/staleness, reconnect/backoff, per-connection metrics.**
@@ -554,6 +558,12 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — Modbus/TCP driver (M9b).** Implemented **in-tree** (no dependency): MBAP
+  framing, function codes 01/02/03/04/05/06/0F/10, coils/discrete inputs and input/holding
+  registers, contiguous-run batching, and configurable word order for 32-bit values. Addresses are
+  `C<n>`/`DI<n>`/`IR<n>`/`HR<n>` (0-based). Tests use an in-tree `ModbusSimulator` plus one
+  `pymodbus`-backed cross-check (dev-only dependency) so our framing is validated against an
+  independent implementation. S7comm is M9c.
 - **2026-10-06 — PLC connectivity is the project's purpose (M9).** Creek centralizes PLC/SCADA
   state: a `Poller` per connection reads tags via a `PlcDriver` and mirrors them into the store as
   typed values, publishing changes on channels named after the tag keys. PLC state is **derived**,

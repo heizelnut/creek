@@ -1,9 +1,9 @@
 # PLC connectivity — design sketch
 
-> **Status: design sketch + foundation implemented.** This describes how Creek centralizes PLC
-> state for a SCADA system over **Modbus/TCP** and **Siemens S7**. The tag model, driver interface,
-> and poller exist (`src/creek/plc/`); the Modbus and S7 wire drivers are next. See `AGENTS.md`
-> §17 (M9).
+> **Status: M9a/M9b implemented.** This describes how Creek centralizes PLC state for a SCADA
+> system over **Modbus/TCP** and **Siemens S7**. The tag model, driver interface, poller, and the
+> in-tree Modbus/TCP driver + simulator exist (`src/creek/plc/`); the S7comm driver is next. See
+> `AGENTS.md` §17 (M9).
 
 ## 1. The goal
 
@@ -129,7 +129,7 @@ timestamp, or a structured metadata map. **Decision pending** — see §8.
 | Phase | Deliverable |
 |---|---|
 | **M9a** | Tag map, driver interface, poller *(implemented)* |
-| **M9b** | Modbus/TCP driver + fake-server tests |
+| **M9b** | Modbus/TCP driver + simulator + pymodbus cross-check *(implemented)* |
 | **M9c** | S7comm driver + protocol tests |
 | **M9d** | Manager + `--plc-config` wiring; `PLC` admin commands; write audit |
 | **M9e** | Quality/staleness, reconnect/backoff, per-connection metrics |
