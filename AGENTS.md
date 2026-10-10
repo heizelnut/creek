@@ -502,8 +502,9 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
     an in-tree simulator, and a `pymodbus` cross-check. *(implemented)*
   - **M9c — S7 driver:** DB/I/Q/M read/write via `python-snap7` (requires the native snap7
     library). *(implemented)*
-  - **M9d — Manager + commands:** `--plc-config` wiring, `PLC` admin commands, write audit.
-  - **M9e — Quality/staleness, reconnect/backoff, per-connection metrics.**
+  - **M9d — Manager + commands:** `--plc-config` wiring, `PLC LIST|TAGS|INFO|WRITE`, write audit.
+    *(implemented)*
+  - **M9e — Quality/staleness, reconnect/backoff, per-connection status.** *(implemented)*
 
 ## 18. Decision log
 
@@ -561,6 +562,13 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — PLC manager, commands, and quality (M9d/M9e).** `PlcManager` owns a driver and a
+  poller per connection and is wired into `Server` via `--plc-config`. The `PLC` command
+  (`LIST`/`TAGS`/`INFO`/`WRITE`, `write` scope) introspects connections and writes tags; writes
+  scale engineering units back to raw counts, read the tag back into the mirror, and are audited on
+  `creek.audit`. Pollers expose `link`/`polls`/`errors`/`last_success`, back off on failure, and
+  publish a companion `<key>.q` quality key (`good`/`stale`, opt-out via `params.quality`). PLC tags
+  live in the connection's namespace, so SCADA clients authenticate into it.
 - **2026-10-06 — S7 driver (M9c).** Built on **`python-snap7`** (native `libsnap7` required) rather
   than an in-tree S7comm implementation: it is battle-tested against real S7-300/400/1200/1500, and
   S7comm is fiddly to get right. `python-snap7` is synchronous, so calls are offloaded with

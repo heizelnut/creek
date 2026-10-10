@@ -1,9 +1,9 @@
 # PLC connectivity — design sketch
 
-> **Status: M9a–M9c implemented.** This describes how Creek centralizes PLC state for a SCADA
-> system over **Modbus/TCP** and **Siemens S7**. The tag model, driver interface, poller, the
-> in-tree Modbus/TCP driver + simulator, and the S7 driver (via `python-snap7`) exist
-> (`src/creek/plc/`). See `AGENTS.md` §17 (M9).
+> **Status: M9a–M9e implemented.** Creek centralizes PLC state for a SCADA system over
+> **Modbus/TCP** and **Siemens S7**: tag map, driver interface, poller, in-tree Modbus/TCP driver +
+> simulator, S7 driver (`python-snap7`), a manager wired into the server via `--plc-config`, the
+> `PLC` command surface, write audit, and quality/staleness. See `AGENTS.md` §17 (M9).
 
 ## 1. The goal
 
@@ -62,7 +62,7 @@ A single JSON file (`--plc-config`):
 | `creek.plc.poller` | `Poller`: read → scale → store → publish |
 | `creek.plc.modbus` | Modbus/TCP driver *(next)* |
 | `creek.plc.s7` | S7comm driver *(next)* |
-| `creek.plc.manager` | owns connections, drivers, pollers; routes writes *(next)* |
+| `creek.plc.manager` | owns connections, drivers, pollers; routes writes *(implemented)* |
 
 The store write uses the non-journaling `Store.restore`: PLC state is **derived** and re-polled on
 restart, so it must not bloat the WAL. Each changed tag is published on a channel named after its
@@ -103,9 +103,11 @@ are preserved.
 
 ## 6. Quality, staleness, and timestamps
 
-A SCADA system needs to know *whether* a value is trustworthy. The typed-value model has no quality
-field, so the plan is a companion key per tag (`<key>.q`) carrying `good|bad|stale` and a
-timestamp, or a structured metadata map. **Decision pending** — see §8.
+A SCADA system needs to know *whether* a value is trustworthy. While a connection is healthy every
+tag is `good`; when a poll fails the tags become `stale` (the last known value is kept, not cleared).
+Quality is published as a companion key per tag, `<key>.q` = `good` / `stale`, so a SCADA can
+`SUBSCRIBE` to it. It is written with the same non-journaled `Store.restore` and can be disabled per
+connection with `params.quality = "false"`. A failed poll also backs off (doubling, capped at 60s).
 
 ## 7. Safety
 
@@ -124,7 +126,7 @@ timestamp, or a structured metadata map. **Decision pending** — see §8.
 2. **Target S7 models** — S7-300/400 only, or also S7-1200/1500 with PUT/GET + non-optimized DBs?
 3. **Control vs monitor** — start read-only, then enable writes per tag, or support writes from day
    one? (Recommendation: read-only first, writes behind `writable` + audit.)
-4. **Quality model** — companion `.q` keys, a structured value, or a separate `PLC` command surface?
+4. **Quality model** — *resolved*: companion `<key>.q` keys (`good`/`stale`), opt-out per connection.
 5. **Batching** — per-tag requests first (simple), then contiguous-run grouping.
 
 ## 9. Roadmap (M9)
@@ -134,5 +136,5 @@ timestamp, or a structured metadata map. **Decision pending** — see §8.
 | **M9a** | Tag map, driver interface, poller *(implemented)* |
 | **M9b** | Modbus/TCP driver + simulator + pymodbus cross-check *(implemented)* |
 | **M9c** | S7 driver via `python-snap7` + tests against a snap7 server *(implemented)* |
-| **M9d** | Manager + `--plc-config` wiring; `PLC` admin commands; write audit |
-| **M9e** | Quality/staleness, reconnect/backoff, per-connection metrics |
+| **M9d** | Manager + `--plc-config` wiring; `PLC` commands; write audit *(implemented)* |
+| **M9e** | Quality/staleness, reconnect/backoff, per-connection status *(implemented)* |

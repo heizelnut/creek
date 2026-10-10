@@ -297,6 +297,20 @@ counters). Admin-scoped commands are written to the server's audit log.
 Keys and channels are limited to 1024 bytes; longer values return `ERR key too long` or
 `ERR channel too long`.
 
+### PLC
+
+| Command | Args | Reply |
+|---|---|---|
+| `PLC LIST` | | array of connection names |
+| `PLC TAGS [connection]` | | array of tag keys |
+| `PLC INFO [connection]` | | bulk text |
+| `PLC WRITE key value` | | `OK` |
+
+`PLC` has `write` scope (it can move machinery). Tag values are mirrored into the connection's
+namespace as typed values and published on channels named after their keys; `PLC WRITE` takes
+**engineering units** (scaled tags convert to raw counts) and is audited. A companion `<key>.q` key
+carries `good`/`stale`.
+
 ### Replication / cluster
 
 | Command | Args | Reply |

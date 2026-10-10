@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replicaof", default=None, help="follow a primary (host:port)")
     parser.add_argument("--replica-token", default=None, help="AUTH token for the primary")
     parser.add_argument("--cluster-config", type=Path, default=None, help="JSON slot topology")
+    parser.add_argument("--plc-config", type=Path, default=None, help="JSON PLC tag map")
     parser.add_argument(
         "--auto-failover-after",
         type=float,
@@ -84,6 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         replicaof=replicaof,
         auto_failover_after=args.auto_failover_after,
         cluster=cluster,
+        plc_config=args.plc_config,
     )
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(config))

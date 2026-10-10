@@ -67,6 +67,33 @@ async def main():
 asyncio.run(main())
 ```
 
+## PLC connectivity
+
+Point Creek at a JSON tag map and it polls Modbus/TCP and Siemens S7 devices into typed keys,
+publishing changes. SCADA clients then `GET`/`SUBSCRIBE` (and `PLC WRITE` to control).
+
+```bash
+uv run creek --plc-config plc.json
+```
+
+```json
+{
+  "connections": [
+    {"name": "line1", "driver": "modbus", "host": "10.0.0.10", "port": 502,
+     "namespace": "line1", "poll_interval": 0.5, "params": {"unit": 1}},
+    {"name": "line2", "driver": "s7", "host": "10.0.0.11", "port": 102,
+     "namespace": "line2", "params": {"rack": 0, "slot": 1}}
+  ],
+  "tags": [
+    {"key": "motor.speed", "connection": "line1", "address": "HR0", "type": "u16", "scale": 0.1},
+    {"key": "motor.run", "connection": "line1", "address": "C0", "type": "bool", "writable": true},
+    {"key": "temp", "connection": "line2", "address": "DB1.DBD0", "type": "f32"}
+  ]
+}
+```
+
+S7 needs the native snap7 library (`brew install snap7`, `apt install libsnap7`). See `PLC.md`.
+
 ## Replication and sharding
 
 Read replicas (pull-based) and static hash-slot sharding are opt-in:

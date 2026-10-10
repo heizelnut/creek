@@ -15,9 +15,11 @@ from dataclasses import dataclass, field
 from creek import __version__
 from creek.auth import Authenticator, Identity
 from creek.cluster import Cluster, key_slot
-from creek.errors import CommandError, InvalidValue
+from creek.errors import CommandError, CreekError, InvalidValue
 from creek.pattern import match
 from creek.persist import Snapshot, encode_records, encode_snapshot
+from creek.plc.manager import PlcError, PlcManager
+from creek.plc.poller import parse_tag_value
 from creek.protocol import Command, Reply, SimpleString, encode_message
 from creek.pubsub import Bus, Subscriber
 from creek.replication import Replication
@@ -47,6 +49,7 @@ class Context:
     quota_tenant: str | None = None
     replication: Replication = field(default_factory=Replication)
     cluster: Cluster | None = None
+    plc: PlcManager | None = None
     close_after_reply: bool = False
 
 
@@ -815,6 +818,79 @@ async def cmd_cluster(command: Command, context: Context) -> Reply:
     raise CommandError(f"unknown subcommand '{command.args[0]}'")
 
 
+def _plc_report(manager: PlcManager, connection: str | None) -> str:
+    lines = ["# PLC"]
+    for entry in manager.connections.values():
+        if connection is not None and entry.connection.name != connection:
+            continue
+        poller = entry.poller
+        last = f"{poller.last_success:.3f}" if poller.last_success is not None else "-"
+        lines.append(
+            f"{entry.connection.name} driver={entry.connection.driver} "
+            f"addr={entry.connection.host}:{entry.connection.port} link={poller.link} "
+            f"tags={len(entry.tags)} polls={poller.polls} errors={poller.errors} "
+            f"last_success={last}"
+        )
+    return "\r\n".join(lines)
+
+
+async def cmd_plc(command: Command, context: Context) -> Reply:
+    manager = context.plc
+    if manager is None:
+        raise CommandError("PLC support is not configured")
+    subcommand = command.args[0].upper()
+    if subcommand == "LIST":
+        names: list[Reply] = list(manager.connections)
+        return names
+    if subcommand == "TAGS":
+        if len(command.args) > 2:
+            raise CommandError("syntax error")
+        connection = command.args[1] if len(command.args) == 2 else None
+        keys: list[Reply] = [
+            tag.key for tag in manager.tags() if connection is None or tag.connection == connection
+        ]
+        return keys
+    if subcommand == "INFO":
+        if len(command.args) > 2:
+            raise CommandError("syntax error")
+        return _plc_report(manager, command.args[1] if len(command.args) == 2 else None)
+    if subcommand == "WRITE":
+        if len(command.args) != 3:
+            raise CommandError("syntax error")
+        tag = manager.tag(command.args[1])
+        if tag is None:
+            raise CommandError(f"unknown PLC tag '{command.args[1]}'")
+        try:
+            value = parse_tag_value(tag, command.args[2])
+        except (ValueError, CreekError) as exc:
+            raise CommandError(str(exc)) from exc
+        try:
+            await manager.write(tag.key, value)
+        except PlcError as exc:
+            raise CommandError(str(exc)) from exc
+        _audit_plc_write(context, tag.key, value)
+        return SimpleString("OK")
+    raise CommandError(f"unknown subcommand '{command.args[0]}'")
+
+
+def _audit_plc_write(context: Context, key: str, value: Value) -> None:
+    identity = context.identity
+    actor = identity.id if identity is not None else "anonymous"
+    log.info(
+        "plc write %s = %s by %s",
+        key,
+        value.text(),
+        actor,
+        extra={
+            "actor": actor,
+            "namespace": identity.namespace if identity is not None else "default",
+            "command": "PLC WRITE",
+            "tag": key,
+            "value": value.text(),
+        },
+    )
+
+
 register("PING", cmd_ping, max_args=1, scope="public")
 register("ECHO", cmd_echo, min_args=1, max_args=1, scope="public")
 register("QUIT", cmd_quit, scope="public")
@@ -849,3 +925,4 @@ register("ROLE", cmd_role, scope="read")
 register("REPLICAOF", cmd_replicaof, min_args=1, max_args=3, scope="admin")
 register("KEYSLOT", cmd_keyslot, min_args=1, max_args=1, scope="read")
 register("CLUSTER", cmd_cluster, min_args=1, max_args=None, scope="admin")
+register("PLC", cmd_plc, min_args=1, max_args=3, scope="write")

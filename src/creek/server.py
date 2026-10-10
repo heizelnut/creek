@@ -32,6 +32,8 @@ from creek.cluster import Cluster
 from creek.commands import Context, execute
 from creek.errors import CommandError, ProtocolError
 from creek.persist import Snapshot, Wal, decode_blob, write_snapshot
+from creek.plc.manager import PlcManager
+from creek.plc.tags import PlcConfig
 from creek.protocol import Command, Error, Incomplete, Reply, encode, parse
 from creek.pubsub import Bus, Subscriber
 from creek.replication import Replication
@@ -58,6 +60,7 @@ class Config:
     replicaof: tuple[str, int, str | None] | None = None
     auto_failover_after: float | None = None
     cluster: Cluster | None = None
+    plc_config: Path | None = None
 
 
 def parse_addr(addr: str) -> tuple[str, int]:
@@ -96,6 +99,9 @@ class Server:
         self.store.journal = self.replication.log
         self.bus.journal = self.replication.log
         self.tenants.journal = self.replication.log
+        self.plc: PlcManager | None = None
+        if config.plc_config is not None:
+            self.plc = PlcManager(PlcConfig.from_file(config.plc_config), self.store, self.bus)
         self._tcp: asyncio.Server | None = None
         self._ws: WsServer | None = None
         self._writers: set[asyncio.StreamWriter] = set()
@@ -108,6 +114,8 @@ class Server:
         if self.config.replicaof is not None:
             host, port, token = self.config.replicaof
             await self.replication.follow(host, port, token)
+        if self.plc is not None:
+            self.plc.start()
         if self.journal is not None:
             self.journal.start()
             if self.config.snapshot_interval > 0:
@@ -142,6 +150,8 @@ class Server:
     async def close(self) -> None:
         """Stop replication, close listeners, snapshot, and close the WAL."""
         await self.replication.stop()
+        if self.plc is not None:
+            await self.plc.close()
         if self._tcp is not None:
             self._tcp.close()
         for writer in list(self._writers):
@@ -279,6 +289,7 @@ class Server:
             quota_tenant=quota_tenant,
             replication=self.replication,
             cluster=self.cluster,
+            plc=self.plc,
         )
 
     async def _run(self, command: Command, context: Context) -> Reply:
