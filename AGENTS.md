@@ -10,9 +10,11 @@
 
 ## 1. What Creek is
 
-Creek is a Redis-like, in-memory key–value store in **async Python** whose primary workload is
-**typed publish/subscribe**. The design keeps its working set in RAM and persists to disk for
-durability.
+Creek is an in-memory, typed key–value store with **publish/subscribe**, written in **async
+Python**. Its primary application is **centralizing PLC/SCADA state**: protocol drivers
+(Modbus/TCP, Siemens S7) mirror PLC values into typed keys and publish changes, so a SCADA/HMI can
+view and control the process over Creek's RESP2 (TCP/WebSocket) interface. The design keeps its
+working set in RAM and persists to disk for durability. See `PLC.md`.
 
 Core traits:
 
@@ -25,6 +27,8 @@ Core traits:
 - **Single asyncio event loop** owns all mutable state; blocking work is offloaded (see §11).
 - **TLS is out of scope** — terminate it at a reverse proxy in front of the TCP listener.
 - **Redis-like command surface** (see §7 and `PROTOCOL.md`).
+- **PLC connectivity** — Modbus/TCP and Siemens S7 drivers poll PLCs into typed keys and publish
+  changes, with opt-in writes (see §17 M9 and `PLC.md`).
 
 Creek is *not* (v1 non-goals): a Redis drop-in replacement, a general document store, a SQL
 database, or a full RBAC platform. **v1 is single-node** and namespaces are a scoping mechanism,
@@ -144,6 +148,7 @@ creek/
 ├── AGENTS.md
 ├── PROTOCOL.md
 ├── CLUSTERING.md
+├── PLC.md
 ├── pyproject.toml
 ├── uv.lock
 ├── src/creek/
@@ -162,6 +167,7 @@ creek/
 │   ├── tenant.py       tenant registry + quotas (M6)
 │   ├── cluster.py      hash slots + topology (M7b)
 │   ├── replication.py  replication log + replicas (M7a/c)
+│   ├── plc/            PLC drivers, tag map, polling (M9)
 │   └── client.py       async client library (M5)
 ├── tests/          test_protocol.py test_commands.py test_auth.py
 │                   test_cli.py test_server.py test_value.py
@@ -484,6 +490,13 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
   bus, quorum failure detection, replica elections, resharding, and cluster-wide pub/sub. See
   `CLUSTERING.md` for the design and the proposed M8a–M8f phases. Requires a durable-ack barrier
   (`WAIT`/group commit) before automatic failover can be trusted.
+- **M9 — PLC connectivity:** centralize PLC state for SCADA (see `PLC.md`).
+  - **M9a — Tag map + poller:** `Connection`/`Tag`/`PlcConfig`, the `PlcDriver` interface, and a
+    `Poller` that mirrors tags into the store (non-journaled) and publishes changes. *(implemented)*
+  - **M9b — Modbus/TCP driver:** coils/discrete/input/holding registers, read + write, batching.
+  - **M9c — S7comm driver:** DB/I/Q/M via TPKT/COTP/S7 read-var and write-var.
+  - **M9d — Manager + commands:** `--plc-config` wiring, `PLC` admin commands, write audit.
+  - **M9e — Quality/staleness, reconnect/backoff, per-connection metrics.**
 
 ## 18. Decision log
 
@@ -541,6 +554,12 @@ Notable decisions future work must respect (newest last).
   fsyncs after every record *in the background*, so a command never blocks on disk. The store and
   bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
   A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
+- **2026-10-06 — PLC connectivity is the project's purpose (M9).** Creek centralizes PLC/SCADA
+  state: a `Poller` per connection reads tags via a `PlcDriver` and mirrors them into the store as
+  typed values, publishing changes on channels named after the tag keys. PLC state is **derived**,
+  so it is written with the non-journaling `Store.restore` (it is re-polled on restart). Writes are
+  opt-in per tag (`writable`) and audited. The tag map, driver interface, and poller are in
+  `creek.plc`; the Modbus/TCP and S7comm wire drivers are M9b/M9c. See `PLC.md`.
 - **2026-10-06 — Read replicas (M7a).** Replication is **pull-based**: the primary keeps a
   bounded in-memory backlog (`ReplicationLog`, the journal used by store/bus/tenants, optionally
   forwarding to the WAL) and serves `SYNC` (full snapshot) and `REPLICATE <offset>` (records since
