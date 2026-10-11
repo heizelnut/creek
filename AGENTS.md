@@ -2,11 +2,12 @@
 
 > Instructions and shared context for AI coding agents (and humans) working in this repository.
 > Read this file completely before making changes. Update it whenever you make a decision that
-> future work must respect. See also `PROTOCOL.md` for the wire specification.
+> future work must respect. See also `PROTOCOL.md` for the wire specification, `PLC.md` and
+> `CLUSTERING.md` for subsystem designs, and `STATUS.md` for a point-in-time snapshot.
 >
-> **Status: early implementation.** The design targets **async Python (asyncio)**. `AGENTS.md` and
-> `PROTOCOL.md` describe the intended architecture; the M0 skeleton (`src/creek/`, `tests/`) exists
-> and runs both transports. The roadmap (§17) is the authoritative record of what is built.
+> **Status: M0–M7 and M9 implemented; M8 is a design sketch.** The design targets **async Python
+> (asyncio)**; the server runs both transports and centralizes PLC/SCADA state over Modbus/TCP and
+> S7. The roadmap (§17) is the authoritative record of what is built.
 
 ## 1. What Creek is
 
@@ -41,6 +42,8 @@ file is updated first.
 
 - Treat this as the source of truth for architecture and conventions. If code and this file
   disagree, fix the code or update this file — do not silently diverge.
+- `STATUS.md` is a snapshot (what's built, what's verified, next steps); keep it roughly current.
+  This file remains the source of truth for design and decisions.
 - Before finishing a task: run `ruff format --check .`, `ruff check .`, `mypy src`, and
   `pytest -q` (prefix with `uv run` when not in an activated venv). All four must pass.
 - Prefer the standard library. Any new third-party dependency must be justified in the PR/commit
@@ -149,6 +152,7 @@ creek/
 ├── PROTOCOL.md
 ├── CLUSTERING.md
 ├── PLC.md
+├── STATUS.md
 ├── pyproject.toml
 ├── uv.lock
 ├── src/creek/
