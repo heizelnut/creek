@@ -1,4 +1,4 @@
-# creek-plc — status
+# creek — status
 
 > A point-in-time snapshot of what is built, what is verified, and what is left. The architecture
 > and decisions live in `AGENTS.md`; the driver/tag-map design in `PLC.md`. Update this file as the
@@ -8,7 +8,7 @@
 - **Tests:** 215 passing.
 - **Gates:** `ruff format --check .`, `ruff check .`, `mypy src` (strict), `pytest -q` — all clean.
 
-## What creek-plc is
+## What creek is
 
 A single asyncio daemon that mirrors PLC tags into an existing Redis instance and forwards writes
 from a Redis Stream back to the PLC. Redis is the store, the pub/sub bus, and the command queue; the

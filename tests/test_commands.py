@@ -160,7 +160,7 @@ async def test_consumer_drains_the_stream() -> None:
 async def test_start_tolerates_existing_group() -> None:
     manager, _ = _manager()
     redis = FakeRedis()
-    await redis.xgroup_create("plc:commands", "creek-plc")
+    await redis.xgroup_create("plc:commands", "creek")
     consumer = CommandConsumer(manager, redis, block_ms=10)
     await consumer.start()
     await consumer.stop()

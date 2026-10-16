@@ -1,16 +1,16 @@
 # PLC connectivity — design
 
-> **Status: implemented.** `creek-plc` mirrors PLC state into an existing Redis instance and
+> **Status: implemented.** `creek` mirrors PLC state into an existing Redis instance and
 > forwards writes from a Redis Stream back to the PLC. Tag map, driver interface, poller, Modbus/TCP
 > driver + simulator, S7 driver (`python-snap7`), the Redis mirror, the command consumer, quality,
 > and write audit are all built. See `AGENTS.md` §17.
 
 ## 1. The goal
 
-`creek-plc` sits between PLCs and a SCADA/HMI, using Redis as the shared store and bus:
+`creek` sits between PLCs and a SCADA/HMI, using Redis as the shared store and bus:
 
 ```
-   PLCs                  creek-plc (this project)                  Redis                SCADA / HMI
+   PLCs                  creek (this project)                  Redis                SCADA / HMI
  ┌──────────┐  Modbus  ┌──────────────────────────────┐   SET/PUBLISH   ┌─────────┐  GET/SUBSCRIBE
  │ S7-1200  │◄────────►│  drivers → Poller            │────────────────►│ plc:*   │◄──────────────
  │ Modbus   │  S7comm  │   read → scale → mirror      │                 │ Stream  │
@@ -126,7 +126,7 @@ redis-cli XADD plc:commands '*' key motor.speed value 20
 - The daemon writes the PLC, reads the tag back into the mirror, and `XACK`s the entry.
 - Rejections (unknown tag, read-only tag, driver error, malformed entry) are logged on the
   `creek.audit` logger and acknowledged anyway, so one bad entry cannot block the queue.
-- The consumer group (`--consumer-group`, default `creek-plc`) with a per-process consumer name lets
+- The consumer group (`--consumer-group`, default `creek`) with a per-process consumer name lets
   several daemons share the work.
 
 ## 8. Safety
@@ -135,7 +135,7 @@ redis-cli XADD plc:commands '*' key motor.speed value 20
 - The daemon has no auth of its own: protect the command stream with Redis ACLs and run on the OT
   network. Anyone who can `XADD` can write to a PLC.
 - Consider a global write-enable flag and per-connection rate limits (see `AGENTS.md` §14).
-- `creek-plc` is **not safety-certified**. Interlocks, watchdogs, and fail-safes stay in the PLC;
+- `creek` is **not safety-certified**. Interlocks, watchdogs, and fail-safes stay in the PLC;
   it must never be in a control loop.
 - No bus/PLC TLS in v1.
 

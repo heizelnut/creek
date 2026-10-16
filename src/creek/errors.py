@@ -1,4 +1,4 @@
-"""Exception hierarchy for creek-plc.
+"""Exception hierarchy for creek.
 
 Library code raises these; only :mod:`creek.cli` decides process exit codes.
 """
@@ -7,7 +7,7 @@ from __future__ import annotations
 
 
 class CreekError(Exception):
-    """Base class for all creek-plc errors."""
+    """Base class for all creek errors."""
 
 
 class InvalidValue(CreekError):

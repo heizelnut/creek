@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "creek-plc"
+name = "creek"
 version = "0.0.0"
 description = "Sync PLC state (Modbus/TCP, Siemens S7) with an existing Redis instance."
 readme = "README.md"
@@ -13,7 +13,7 @@ authors = [{ name = "heizelnut" }]
 dependencies = ["python-snap7>=3.0", "redis>=5"]
 
 [project.scripts]
-creek-plc = "creek.cli:main"
+creek = "creek.cli:main"
 
 # pip:  pip install -e ".[dev]"
 [project.optional-dependencies]

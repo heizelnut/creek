@@ -1,21 +1,21 @@
-# AGENTS.md — creek-plc
+# AGENTS.md — creek
 
 > Instructions and shared context for AI coding agents (and humans) working in this repository.
 > Read this file completely before making changes. Update it whenever you make a decision that
 > future work must respect. See also `PLC.md` for the driver/tag-map design and `STATUS.md` for a
 > point-in-time snapshot.
 >
-> **Status: implemented.** `creek-plc` is a single asyncio daemon that mirrors PLC tags into an
+> **Status: implemented.** `creek` is a single asyncio daemon that mirrors PLC tags into an
 > existing Redis instance and forwards writes from a Redis Stream back to the PLC.
 
-## 1. What creek-plc is
+## 1. What creek is
 
-`creek-plc` is a **PLC ↔ Redis sync daemon**. It does not implement a database, a protocol, or a
+`creek` is a **PLC ↔ Redis sync daemon**. It does not implement a database, a protocol, or a
 server: **Redis is the store, the pub/sub bus, and the command queue.** The daemon owns only the
 part Redis cannot do — talking to PLCs.
 
 ```
-   PLCs                       creek-plc (this repo)                 Redis
+   PLCs                       creek (this repo)                 Redis
  ┌──────────┐  Modbus/TCP   ┌───────────────────────────┐       ┌──────────────┐
  │ S7-1200  │◄─────────────►│  drivers → Poller         │─SET─► │ plc:<key>    │
  │ Modbus   │  S7comm       │   (read → scale)          │─PUB─► │ plc:<key>    │
@@ -65,7 +65,7 @@ Requires **Python 3.12+**. Use either **uv** (fast, locks the interpreter) or pl
 
 ```bash
 uv sync                          # creates .venv, installs deps + dev group
-uv run creek-plc --config plc.json
+uv run creek --config plc.json
 uv run pytest -q
 uv run ruff format --check .
 uv run ruff check .
@@ -78,13 +78,13 @@ uv run mypy src
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"         # [dev] adds pytest, ruff, mypy, pymodbus
-creek-plc --config plc.json
+creek --config plc.json
 ```
 
 ### Running it
 
 ```bash
-uv run creek-plc \
+uv run creek \
   --config ./plc.json \
   --redis-url redis://127.0.0.1:6379/0 \
   --key-prefix plc: \
@@ -96,7 +96,7 @@ Flags (all parsed in `src/creek/cli.py` via `argparse`): `--config` (required), 
 `--key-prefix`, `--command-stream`, `--consumer-group`, `--timestamps`, `--dry-run`,
 `--log-level`, `--version`. `--dry-run` polls the PLCs and logs changes without touching Redis.
 
-- Entry point: console script `creek-plc = creek.cli:main`; also `python -m creek`.
+- Entry point: console script `creek = creek.cli:main`; also `python -m creek`.
 - Dev dependencies are declared in **both** `[project.optional-dependencies].dev` (pip) and
   `[dependency-groups].dev` (uv); `tests/test_packaging.py` fails if they drift.
 - On this machine the system interpreter is old; if uv discovery fails, pin it:
@@ -201,7 +201,7 @@ redis-cli XADD plc:commands '*' key motor.speed value 20
 
 - Fields: `key` (the tag key) and `value` (engineering units; scaled tags are converted back to raw
   counts). Extra fields are ignored.
-- Group/consumer: `--consumer-group` (default `creek-plc`) and a per-process consumer name
+- Group/consumer: `--consumer-group` (default `creek`) and a per-process consumer name
   (`hostname-pid`), so several daemons can share a group.
 - **Every** entry is `XACK`ed, including malformed or rejected ones, so one bad entry cannot block
   the queue. Rejections are logged on the `creek.audit` logger (unknown tag, read-only tag, driver
@@ -222,7 +222,7 @@ the PLC's actual value (not the requested one) as soon as the write completes.
 - Writes are logged to the `creek.audit` logger with `key`, `value`, `entry`, and `stream` fields.
 - Consider a global write-enable flag and per-connection rate limits (see §14) so a runaway client
   cannot hammer a PLC.
-- `creek-plc` is **not safety-certified**. Interlocks, watchdogs, and fail-safes stay in the PLC;
+- `creek` is **not safety-certified**. Interlocks, watchdogs, and fail-safes stay in the PLC;
   the daemon must never be in a control loop.
 - There is no bus/PLC TLS in v1. Modbus/TCP and S7 are plaintext by design.
 
@@ -352,7 +352,7 @@ Dev dependencies are listed twice — `[project.optional-dependencies].dev` for 
 
 | Term | Meaning |
 |---|---|
-| **creek-plc** | This project: the PLC ↔ Redis sync daemon. |
+| **creek** | This project: the PLC ↔ Redis sync daemon. |
 | **Mirror** | The sink for polled values (`RedisMirror`, `MemoryMirror`). |
 | **Tag** | One PLC point mapped to a Redis key (address, type, scale, writable). |
 | **Connection** | One PLC link: driver, host/port, poll interval, driver params. |

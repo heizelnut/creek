@@ -17,4 +17,4 @@ def test_dev_dependency_lists_match() -> None:
 
 def test_entry_point_is_creek_plc() -> None:
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    assert data["project"]["scripts"] == {"creek-plc": "creek.cli:main"}
+    assert data["project"]["scripts"] == {"creek": "creek.cli:main"}

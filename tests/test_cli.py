@@ -19,7 +19,7 @@ def test_defaults() -> None:
     assert args.redis_url == "redis://127.0.0.1:6379/0"
     assert args.key_prefix == "plc:"
     assert args.command_stream == "plc:commands"
-    assert args.consumer_group == "creek-plc"
+    assert args.consumer_group == "creek"
     assert args.timestamps is False
     assert args.dry_run is False
 

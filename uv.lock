@@ -80,7 +80,7 @@ wheels = [
 ]
 
 [[package]]
-name = "creek-plc"
+name = "creek"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [

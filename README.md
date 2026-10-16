@@ -1,13 +1,13 @@
-# creek-plc
+# creek
 
-`creek-plc` is a small **async Python daemon that syncs PLCs with an existing Redis instance**.
+`creek` is a small **async Python daemon that syncs PLCs with an existing Redis instance**.
 
 It polls **Modbus/TCP** and **Siemens S7** devices into Redis keys, publishes changes, and forwards
 writes from a Redis Stream back to the PLC. Redis is the store, the pub/sub bus, and the command
 queue — this project only owns the part Redis cannot do: talking to PLCs.
 
 ```
-   PLCs                creek-plc                    Redis                 SCADA / HMI
+   PLCs                creek                    Redis                 SCADA / HMI
  ┌──────────┐  Modbus  ┌──────────────┐   SET/PUBLISH   ┌─────────┐  GET/SUBSCRIBE
  │ S7-1200  │◄────────►│  poller      │────────────────►│ plc:*   │◄──────────────
  │ Modbus   │  S7comm  │  command c.  │◄── XREADGROUP ──│ Stream  │◄── XADD
@@ -27,7 +27,7 @@ Python (no native library to install). The project works with either **uv** or p
 ```bash
 cp plc.example.json plc.json      # sample tag map; edit hosts/tags for your PLCs
 uv sync
-uv run creek-plc --config plc.json
+uv run creek --config plc.json
 ```
 
 ### With pip
@@ -37,7 +37,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 cp plc.example.json plc.json      # sample tag map; edit hosts/tags for your PLCs
-creek-plc --config plc.json
+creek --config plc.json
 ```
 
 ### Tag map
@@ -95,12 +95,12 @@ write to a PLC.
 ## CLI
 
 ```bash
-creek-plc \
+creek \
   --config ./plc.json \
   --redis-url redis://127.0.0.1:6379/0 \
   --key-prefix plc: \
   --command-stream plc:commands \
-  --consumer-group creek-plc \
+  --consumer-group creek \
   --timestamps \
   --log-level info
 ```

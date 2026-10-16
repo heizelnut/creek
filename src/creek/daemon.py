@@ -32,7 +32,7 @@ class RedisConfig:
     url: str = "redis://127.0.0.1:6379/0"
     key_prefix: str = "plc:"
     command_stream: str = "plc:commands"
-    consumer_group: str = "creek-plc"
+    consumer_group: str = "creek"
     timestamps: bool = False
 
 
@@ -95,7 +95,7 @@ class Daemon:
             )
             await self.consumer.start()
         log.info(
-            "creek-plc ready",
+            "creek ready",
             extra={
                 "connections": len(self.config.connections),
                 "tags": len(self.config.tags),

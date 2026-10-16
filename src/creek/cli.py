@@ -1,4 +1,4 @@
-"""Command-line entry point for the creek-plc daemon."""
+"""Command-line entry point for the creek daemon."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from creek.plc import PlcConfig, PlcConfigError
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser (flags documented in ``AGENTS.md`` §3)."""
     parser = argparse.ArgumentParser(
-        prog="creek-plc",
+        prog="creek",
         description="Mirror PLC tags into Redis and forward writes from a Redis Stream.",
     )
     parser.add_argument("--config", type=Path, required=True, help="JSON PLC tag map")
@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--command-stream", default="plc:commands", help="Redis Stream carrying PLC writes"
     )
-    parser.add_argument("--consumer-group", default="creek-plc", help="Stream consumer group")
+    parser.add_argument("--consumer-group", default="creek", help="Stream consumer group")
     parser.add_argument(
         "--timestamps", action="store_true", help="also write <key>.ts (unix seconds)"
     )
@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="poll PLCs and log changes; do not touch Redis"
     )
     parser.add_argument("--log-level", default="info", help="debug|info|warning|error")
-    parser.add_argument("--version", action="version", version=f"creek-plc {__version__}")
+    parser.add_argument("--version", action="version", version=f"creek {__version__}")
     return parser
 
 
