@@ -1,22 +1,33 @@
-# Creek
+# creek-plc
 
-Creek is an in-memory key–value store with **typed publish/subscribe** as its primary workload,
-written in **async Python** (asyncio). It speaks a **RESP2 subset** over both **WebSocket**
-(native, one command per binary frame) and **TCP** (redis-cli compatible for scalar commands), and
-persists to disk with a write-ahead log plus periodic snapshots.
+`creek-plc` is a small **async Python daemon that syncs PLCs with an existing Redis instance**.
 
-> **Status:** early implementation (M0 skeleton). See `AGENTS.md` for the full architecture and
-> `PROTOCOL.md` for the wire specification.
+It polls **Modbus/TCP** and **Siemens S7** devices into Redis keys, publishes changes, and forwards
+writes from a Redis Stream back to the PLC. Redis is the store, the pub/sub bus, and the command
+queue — this project only owns the part Redis cannot do: talking to PLCs.
 
-Requires **Python 3.12+**. The project works with either **uv** or plain **pip**.
+```
+   PLCs                creek-plc                    Redis                 SCADA / HMI
+ ┌──────────┐  Modbus  ┌──────────────┐   SET/PUBLISH   ┌─────────┐  GET/SUBSCRIBE
+ │ S7-1200  │◄────────►│  poller      │────────────────►│ plc:*   │◄──────────────
+ │ Modbus   │  S7comm  │  command c.  │◄── XREADGROUP ──│ Stream  │◄── XADD
+ └──────────┘          └──────────────┘                 └─────────┘
+```
+
+> **Status:** implemented (M0–M4). See `AGENTS.md` for the architecture and `PLC.md` for the
+> driver/tag-map design.
+
+Requires **Python 3.12+** and a reachable **Redis**. S7 support uses `python-snap7`, which is pure
+Python (no native library to install). The project works with either **uv** or plain **pip**.
 
 ## Quick start
 
 ### With uv
 
 ```bash
+cp plc.example.json plc.json      # sample tag map; edit hosts/tags for your PLCs
 uv sync
-uv run creek                    # WS + static :7100, TCP :7101
+uv run creek-plc --config plc.json
 ```
 
 ### With pip
@@ -24,65 +35,20 @@ uv run creek                    # WS + static :7100, TCP :7101
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"         # the [dev] extra adds pytest, ruff, mypy
-creek
+pip install -e ".[dev]"
+cp plc.example.json plc.json      # sample tag map; edit hosts/tags for your PLCs
+creek-plc --config plc.json
 ```
 
-Then connect:
-
-```bash
-redis-cli -p 7101 PING
-```
-
-```python
-import asyncio, websockets
-
-
-async def main():
-    async with websockets.connect("ws://localhost:7100/ws") as ws:
-        await ws.send(b"PING\r\n")  # same RESP bytes as the TCP listener
-        print(await ws.recv())  # b"+PONG\r\n"
-
-
-asyncio.run(main())
-```
-
-## Client library
-
-`creek.client` is an async client that speaks both transports and decodes replies to native
-Python values (a server error raises `CommandError`).
-
-```python
-import asyncio
-from creek.client import connect
-
-
-async def main():
-    async with await connect("ws://localhost:7100/ws") as client:  # or tcp://host:port
-        await client.set("temp", "21.5", type="f32", ex=60)
-        print(await client.get("temp"))  # ['f32', '21.5']
-        await client.publish("news", "hello")
-
-
-asyncio.run(main())
-```
-
-## PLC connectivity
-
-Point Creek at a JSON tag map and it polls Modbus/TCP and Siemens S7 devices into typed keys,
-publishing changes. SCADA clients then `GET`/`SUBSCRIBE` (and `PLC WRITE` to control).
-
-```bash
-uv run creek --plc-config plc.json
-```
+### Tag map
 
 ```json
 {
   "connections": [
     {"name": "line1", "driver": "modbus", "host": "10.0.0.10", "port": 502,
-     "namespace": "line1", "poll_interval": 0.5, "params": {"unit": 1}},
+     "poll_interval": 0.5, "params": {"unit": 1}},
     {"name": "line2", "driver": "s7", "host": "10.0.0.11", "port": 102,
-     "namespace": "line2", "params": {"rack": 0, "slot": 1}}
+     "params": {"rack": 0, "slot": 1}}
   ],
   "tags": [
     {"key": "motor.speed", "connection": "line1", "address": "HR0", "type": "u16", "scale": 0.1},
@@ -92,28 +58,55 @@ uv run creek --plc-config plc.json
 }
 ```
 
-S7 needs the native snap7 library (`brew install snap7`, `apt install libsnap7`). See `PLC.md`.
+S7 uses `python-snap7`, which is pure Python — no native library to install. See `PLC.md`.
 
-## Replication and sharding
+### What appears in Redis
 
-Read replicas (pull-based) and static hash-slot sharding are opt-in:
+For each tag the daemon writes, when the value changes:
 
-```bash
-# primary
-uv run creek --tcp-addr :7101
-# replica
-uv run creek --tcp-addr :7102 --replicaof 127.0.0.1:7101
-# a sharded node (JSON topology; see AGENTS.md §17 M7b)
-uv run creek --tcp-addr :7101 --cluster-config cluster.json
+```
+plc:motor.speed      "150.0"     # SET (last value) + PUBLISH on the same channel
+plc:motor.speed.q    "good"      # quality: good / stale (opt-out per connection)
 ```
 
-Replicas serve reads and reject writes with `READONLY`. In a cluster, a key owned by another node
-returns `MOVED <slot> <addr>`; the TCP client follows it automatically.
+`--key-prefix` changes `plc:`; `--timestamps` also writes `plc:motor.speed.ts`.
 
-## Browser pages
+Read current state or subscribe to changes with any Redis client:
 
-With `--web-dir ./web`, the WebSocket listener also serves dependency-free load and performance
-pages at `/` (`index.html`, `loadtest.html`, `perf.html`, `bench.js`).
+```bash
+redis-cli GET plc:motor.speed
+redis-cli SUBSCRIBE plc:motor.speed
+```
+
+### Writing to a PLC
+
+Redis has no server-side hook for "a client wrote a key", so writes are explicit commands on a
+Stream. The daemon consumes them, writes the PLC, reads the tag back, and acknowledges:
+
+```bash
+# motor.speed = 20 engineering units (scaled tags are converted back to raw counts)
+redis-cli XADD plc:commands '*' key motor.speed value 20
+```
+
+Only tags marked `"writable": true` accept writes; every write is audited on the `creek.audit`
+logger. Protect the stream with Redis ACLs and run on the OT network — anyone who can `XADD` can
+write to a PLC.
+
+## CLI
+
+```bash
+creek-plc \
+  --config ./plc.json \
+  --redis-url redis://127.0.0.1:6379/0 \
+  --key-prefix plc: \
+  --command-stream plc:commands \
+  --consumer-group creek-plc \
+  --timestamps \
+  --log-level info
+```
+
+`--dry-run` polls the PLCs and logs changes without touching Redis — useful when commissioning a
+connection.
 
 ## Development
 
@@ -135,13 +128,5 @@ mypy src
 pytest -q
 ```
 
-## Benchmark
-
-`scripts/bench.py` starts a server in a child process and drives it with concurrent clients,
-reporting throughput and latency percentiles. Treat the numbers as a regression baseline.
-
-```bash
-uv run python scripts/bench.py --command ping --clients 10 --requests 1000
-uv run python scripts/bench.py --transport tcp --command set
-uv run python scripts/bench.py --command publish --subscribers 5
-```
+Tests need no live Redis and no hardware: `tests/support.py` provides a fake Redis, and the Modbus
+driver is tested against an in-tree simulator (plus a `pymodbus` cross-check).

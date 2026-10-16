@@ -1,3 +1,3 @@
-"""Creek: a typed, in-memory key-value store with publish/subscribe."""
+"""creek-plc: mirror PLC state into Redis and forward writes back to the PLC."""
 
 __version__ = "0.0.0"

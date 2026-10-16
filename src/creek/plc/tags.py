@@ -16,13 +16,12 @@ class PlcConfigError(CreekError):
 
 @dataclass(frozen=True, slots=True)
 class Connection:
-    """One PLC connection: how to reach it and where its tags live."""
+    """One PLC connection: how to reach it and how often to poll it."""
 
     name: str
     driver: str
     host: str
     port: int
-    namespace: str
     poll_interval: float = 1.0
     params: dict[str, int | str] = field(default_factory=dict)
 
@@ -69,7 +68,6 @@ class PlcConfig:
                 driver=str(entry.get("driver", "")),
                 host=str(entry.get("host", "127.0.0.1")),
                 port=int(entry.get("port", 0)),
-                namespace=str(entry.get("namespace", name)),
                 poll_interval=float(entry.get("poll_interval", 1.0)),
                 params=dict(entry.get("params", {})),
             )

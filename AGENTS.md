@@ -1,54 +1,60 @@
-# AGENTS.md — Creek
+# AGENTS.md — creek-plc
 
 > Instructions and shared context for AI coding agents (and humans) working in this repository.
 > Read this file completely before making changes. Update it whenever you make a decision that
-> future work must respect. See also `PROTOCOL.md` for the wire specification, `PLC.md` and
-> `CLUSTERING.md` for subsystem designs, and `STATUS.md` for a point-in-time snapshot.
+> future work must respect. See also `PLC.md` for the driver/tag-map design and `STATUS.md` for a
+> point-in-time snapshot.
 >
-> **Status: M0–M7 and M9 implemented; M8 is a design sketch.** The design targets **async Python
-> (asyncio)**; the server runs both transports and centralizes PLC/SCADA state over Modbus/TCP and
-> S7. The roadmap (§17) is the authoritative record of what is built.
+> **Status: implemented.** `creek-plc` is a single asyncio daemon that mirrors PLC tags into an
+> existing Redis instance and forwards writes from a Redis Stream back to the PLC.
 
-## 1. What Creek is
+## 1. What creek-plc is
 
-Creek is an in-memory, typed key–value store with **publish/subscribe**, written in **async
-Python**. Its primary application is **centralizing PLC/SCADA state**: protocol drivers
-(Modbus/TCP, Siemens S7) mirror PLC values into typed keys and publish changes, so a SCADA/HMI can
-view and control the process over Creek's RESP2 (TCP/WebSocket) interface. The design keeps its
-working set in RAM and persists to disk for durability. See `PLC.md`.
+`creek-plc` is a **PLC ↔ Redis sync daemon**. It does not implement a database, a protocol, or a
+server: **Redis is the store, the pub/sub bus, and the command queue.** The daemon owns only the
+part Redis cannot do — talking to PLCs.
+
+```
+   PLCs                       creek-plc (this repo)                 Redis
+ ┌──────────┐  Modbus/TCP   ┌───────────────────────────┐       ┌──────────────┐
+ │ S7-1200  │◄─────────────►│  drivers → Poller         │─SET─► │ plc:<key>    │
+ │ Modbus   │  S7comm       │   (read → scale)          │─PUB─► │ plc:<key>    │
+ └──────────┘               │                           │       │ (channel)    │
+                            │  CommandConsumer          │◄XREAD │ plc:commands │
+                            │   → driver.write          │       │ (Stream)     │
+                            └───────────────────────────┘       └──────────────┘
+```
 
 Core traits:
 
-- **In-memory** hot path, **on-disk** durability (write-ahead log + snapshots).
-- **Primitive, typed values** — fixed-width integers, floats, strings, and booleans (see §6).
-- **Auth identifies the client and selects its namespace.** Namespaces scope data today; turning
-  them into hard, isolated tenants is a future milestone (see §8 and §17 M6).
-- **WebSocket is the native transport**; both WebSocket and plain **TCP** speak the same
-  **RESP2** subset (WebSocket is framing only, one command per binary frame).
-- **Single asyncio event loop** owns all mutable state; blocking work is offloaded (see §11).
-- **TLS is out of scope** — terminate it at a reverse proxy in front of the TCP listener.
-- **Redis-like command surface** (see §7 and `PROTOCOL.md`).
-- **PLC connectivity** — Modbus/TCP and Siemens S7 drivers poll PLCs into typed keys and publish
-  changes, with opt-in writes (see §17 M9 and `PLC.md`).
+- **Read path:** a `Poller` per connection reads its tags on an interval, applies scale/offset,
+  and writes changed values to Redis as a string key plus a `PUBLISH` on the same channel name.
+- **Write path:** Redis cannot tell the daemon that a client wrote a key, so writes are explicit.
+  A SCADA/HMI appends to a Redis **Stream** (`XADD plc:commands * key <tag> value <v>`); the daemon
+  consumes it in a **consumer group**, writes the PLC, reads the tag back, and acknowledges.
+- **Redis owns durability.** The daemon is stateless: PLC state is derived and re-polled on
+  restart, so nothing is written to disk by the daemon and there is no WAL or snapshot.
+- **Redis owns auth.** There is no token file or ACL layer in the daemon; use Redis ACLs and run
+  the daemon on a trusted network (OT segment). See §8.
+- **Quality** is exposed as a companion key `<prefix><key>.q` = `good` / `stale` so a SCADA can
+  tell whether a value is trustworthy.
+- **Single asyncio event loop** owns all mutable state; blocking S7 calls are offloaded with
+  `asyncio.to_thread` (see §11).
+- **Drivers:** Modbus/TCP (in-tree, no dependency) and Siemens S7 (`python-snap7`).
 
-Creek is *not* (v1 non-goals): a Redis drop-in replacement, a general document store, a SQL
-database, or a full RBAC platform. **v1 is single-node** and namespaces are a scoping mechanism,
-not a hard tenant boundary. Multitenancy (**M6**) and clustering (**M7**) are implemented as
-opt-in features (§17): v1 stays single-node by default, and clustering is deliberately partial
-(read replicas + static sharding; see M7c). Avoid scope creep in these directions unless this
-file is updated first.
+Non-goals: reimplementing Redis, a RESP server, persistence, auth, clustering, a web UI, or an
+HTTP API. If a change starts to add one of those, stop and revisit this file first.
 
 ## 2. How to use this file (agents)
 
 - Treat this as the source of truth for architecture and conventions. If code and this file
   disagree, fix the code or update this file — do not silently diverge.
 - `STATUS.md` is a snapshot (what's built, what's verified, next steps); keep it roughly current.
-  This file remains the source of truth for design and decisions.
-- Before finishing a task: run `ruff format --check .`, `ruff check .`, `mypy src`, and
-  `pytest -q` (prefix with `uv run` when not in an activated venv). All four must pass.
-- Prefer the standard library. Any new third-party dependency must be justified in the PR/commit
+- Before finishing a task: run `ruff format --check .`, `ruff check .`, `mypy src`, and `pytest -q`
+  (prefix with `uv run` when not in an activated venv). All four must pass.
+- Prefer the standard library. Any new third-party dependency must be justified in the commit
   message and, if structural, recorded in §12.
-- Keep public behavior changes documented here and in `PROTOCOL.md`.
+- Keep public behavior changes documented here and in `PLC.md`.
 - Anything marked **DECISION PENDING** in §14 is an open question: ask before assuming.
 
 ## 3. Quick start
@@ -59,9 +65,8 @@ Requires **Python 3.12+**. Use either **uv** (fast, locks the interpreter) or pl
 
 ```bash
 uv sync                          # creates .venv, installs deps + dev group
-uv run creek                     # WS + static :7100, TCP :7101
+uv run creek-plc --config plc.json
 uv run pytest -q
-uv run pytest -q -k tcp          # one transport
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src
@@ -72,120 +77,82 @@ uv run mypy src
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"         # [dev] adds pytest, ruff, mypy
-creek
-pytest -q
-ruff format --check .
-ruff check .
-mypy src
+pip install -e ".[dev]"         # [dev] adds pytest, ruff, mypy, pymodbus
+creek-plc --config plc.json
 ```
 
-With persistence and a token file (drop the `uv run` prefix under pip):
+### Running it
 
 ```bash
-uv run creek \
-  --ws-addr :7100 \
-  --tcp-addr :7101 \
-  --web-dir ./web \
-  --data-dir ./data \
-  --auth-file ./auth.json \
-  --fsync everysec \
-  --snapshot-interval 5m
+uv run creek-plc \
+  --config ./plc.json \
+  --redis-url redis://127.0.0.1:6379/0 \
+  --key-prefix plc: \
+  --command-stream plc:commands \
+  --log-level info
 ```
 
+Flags (all parsed in `src/creek/cli.py` via `argparse`): `--config` (required), `--redis-url`,
+`--key-prefix`, `--command-stream`, `--consumer-group`, `--timestamps`, `--dry-run`,
+`--log-level`, `--version`. `--dry-run` polls the PLCs and logs changes without touching Redis.
+
+- Entry point: console script `creek-plc = creek.cli:main`; also `python -m creek`.
 - Dev dependencies are declared in **both** `[project.optional-dependencies].dev` (pip) and
   `[dependency-groups].dev` (uv); `tests/test_packaging.py` fails if they drift.
-- On this machine the system interpreter is old and `/usr/local/bin/python` is broken. If uv
-  discovery fails, pin it: `uv sync --python /opt/homebrew/bin/python3.14`.
-- Entry point: console script `creek = creek.cli:main`; also `python -m creek`.
-- Flags (all parsed in `src/creek/cli.py` via `argparse`): `--ws-addr`, `--tcp-addr`, `--web-dir`,
-  `--data-dir`, `--auth-file`, `--fsync` (`always|everysec|no`), `--snapshot-interval`.
+- On this machine the system interpreter is old; if uv discovery fails, pin it:
+  `uv sync --python /opt/homebrew/bin/python3.14`.
 
 ## 4. Architecture at a glance
 
 ```
-        WebSocket (RESP frames)     TCP (RESP stream)
-                   │                     │
-                   └──────────┬──────────┘
-                              ▼
-                    ┌───────────────────────────────┐
-                    │        Transport layer        │  creek.server
-                    │  accept, frame, decode/encode │
-                    └───────────────┬───────────────┘
-                                    ▼
-                    ┌───────────────────────────────┐
-                    │      Protocol / command       │  creek.protocol, creek.commands
-                    │  parse → typed Command → exec │
-                    └───────┬───────────────┬───────┘
-                            ▼               ▼
-              ┌──────────────────┐   ┌──────────────────┐
-              │   Store (KV)     │   │   Pub/Sub bus    │
-              │   keys + TTL     │   │ subs + fanout    │
-              └────────┬─────────┘   └────────┬─────────┘
-                       └──────────┬───────────┘
-                                  ▼
-                    ┌───────────────────────────────┐
-                    │   Persistence (WAL+snapshot)  │  creek.persist
-                    └───────────────────────────────┘
+                    ┌───────────────────────────────────────────┐
+   PLC ──driver──►  │  Poller        read → scale → Mirror      │ ──► Redis SET + PUBLISH
+                    │                                           │
+   PLC ◄─driver──   │  CommandConsumer   XREADGROUP → write     │ ◄── Redis Stream
+                    └───────────────────────────────────────────┘
+                              creek.daemon wires it together
 ```
 
 | Component | Module | Responsibility |
 |---|---|---|
-| Transports | `creek.server` | asyncio TCP/WS listeners, framing, static files |
-| Protocol | `creek.protocol` | RESP2 codec: pure `parse` / `encode` functions |
-| Commands | `creek.commands` | Registry, dispatch, ACLs, built-in handlers |
-| Value model | `creek.value` | (M1) Primitive types, codecs, arithmetic |
-| Patterns | `creek.pattern` | (M1) Glob matching |
-| Store | `creek.store` | (M1) Single-dict in-memory KV, TTL, namespace ownership |
-| Pub/Sub | `creek.pubsub` | Subscription registry, pattern matching, fanout, retained |
-| Auth | `creek.auth` | Client identification → identity + namespace |
-| Persistence | `creek.persist` | (M3) WAL, snapshots, recovery |
-| CLI | `creek.cli` | Flags, wiring, lifecycle, signals, snapshots |
-| Client library | `creek.client` | Async client over WebSocket/TCP |
-| Browser tests | `web/` | Load and performance pages (`bench.js`) |
+| CLI | `creek.cli` | Flags, logging, signals, lifecycle |
+| Daemon | `creek.daemon` | Wire config + Redis + manager; `serve_forever` |
+| Mirror | `creek.mirror` | `Mirror` protocol, `RedisMirror`, `MemoryMirror` |
+| Commands | `creek.commands` | `CommandConsumer`: Redis Stream → PLC writes |
+| Tag map | `creek.plc.tags` | `Connection`, `Tag`, `PlcConfig` (load + validate) |
+| Driver iface | `creek.plc.driver` | `PlcDriver` protocol (connect/close/read/write) |
+| Poller | `creek.plc.poller` | Poll loop, scale/offset, change detection, quality |
+| Manager | `creek.plc.manager` | Owns connections/drivers/pollers; routes writes |
+| Modbus | `creek.plc.modbus` (+ `modbus_server`) | Modbus/TCP driver + in-tree simulator |
+| S7 | `creek.plc.s7` | Siemens S7 driver (`python-snap7`) |
+| Fake driver | `creek.plc.fake` | In-memory driver for tests/dry runs |
+| Values | `creek.value` | Typed primitives, text/binary codec |
 
-## 5. Repository layout (target)
+## 5. Repository layout
 
 ```
 creek/
-├── AGENTS.md
-├── PROTOCOL.md
-├── CLUSTERING.md
-├── PLC.md
-├── STATUS.md
-├── pyproject.toml
-├── uv.lock
+├── AGENTS.md  PLC.md  STATUS.md  README.md
+├── pyproject.toml  uv.lock
 ├── src/creek/
 │   ├── __init__.py __main__.py
-│   ├── cli.py          flags, Config, lifecycle
-│   ├── server.py       TCP + WebSocket listeners, static files
-│   ├── protocol.py     RESP2 codec (pure parse/encode)
-│   ├── commands.py     registry, dispatch, built-in commands
-│   ├── auth.py         token -> Identity
-│   ├── errors.py       ProtocolError, CommandError
-│   ├── value.py        typed values (M1a)
-│   ├── store.py        keys + TTL (M1b)
-│   ├── pattern.py      glob matching (M1b)
-│   ├── pubsub.py       subscriptions + fanout (M2)
-│   ├── persist.py      WAL + snapshots (M3)
-│   ├── tenant.py       tenant registry + quotas (M6)
-│   ├── cluster.py      hash slots + topology (M7b)
-│   ├── replication.py  replication log + replicas (M7a/c)
-│   ├── plc/            PLC drivers, tag map, polling (M9)
-│   └── client.py       async client library (M5)
-├── tests/          test_protocol.py test_commands.py test_auth.py
-│                   test_cli.py test_server.py test_value.py
-│                   test_store.py test_pubsub.py test_persist.py
-│                   test_client.py test_fuzz.py test_packaging.py ...
-├── scripts/        bench.py (load/benchmark harness), hash_token.py
-└── web/            index.html loadtest.html perf.html bench.js
+│   ├── cli.py          flags, lifecycle
+│   ├── daemon.py       RedisConfig, Daemon wiring
+│   ├── mirror.py       Mirror protocol, RedisMirror, MemoryMirror
+│   ├── commands.py     CommandConsumer (write path)
+│   ├── errors.py       CreekError, InvalidValue
+│   ├── value.py        typed values
+│   └── plc/            driver, tags, poller, manager, modbus, modbus_server, s7, fake
+└── tests/              test_value test_tags test_mirror test_poller
+                        test_commands test_daemon test_cli test_packaging
+                        test_modbus test_modbus_pymodbus test_s7
+                        support.py (fakes)
 ```
-
-A `creek-client` Python client package is planned but not yet implemented (see §14).
 
 ## 6. Value model
 
-Every value is a tagged primitive. The type is part of the value, not inferred at read time.
+`creek.value` is retained from the earlier project: a tagged primitive used by drivers to decode
+raw PLC words. The type is part of the value, not inferred at read time.
 
 | Tag | Meaning | Width | Python storage / range |
 |---|---|---|---|
@@ -201,155 +168,113 @@ Every value is a tagged primitive. The type is part of the value, not inferred a
 | `str` | UTF-8 string | var | `str`, length-prefixed, max 512 KiB |
 | `bool`| boolean | 1 bit | `bool`, encoded as `u8` 0/1 on the wire |
 
-Encoding rules:
-
 - Wire/storage format is **little-endian** for fixed-width numerics (`struct` prefix `<`).
-- Canonical binary layout: `1 type byte || payload` (see `PROTOCOL.md` §5.1).
-  `Value.to_bytes()` / `Value.from_bytes()` implement it; persistence embeds the blob.
 - Python `int` is unbounded, so **every** integer type is range-checked on write and after
-  arithmetic. `i4`/`u4` are logically 4-bit but stored as a masked byte in v1 (see §14).
-- `f16` uses `struct`'s `"e"`; `f8` (E4M3) is implemented in `creek/value.py` (no dependency).
-  f16/f32 overflow rounds to ±inf; f8 saturates to ±448 (no infinity in E4M3).
-- Values are immutable once stored (`frozen=True` dataclass); mutations replace the value. Every
-  entry carries an **owner** (namespace) so a shared store can scope keys per client.
+  arithmetic. `i4`/`u4` are logically 4-bit but stored as a masked byte in v1.
+- `Value.text()` is what the daemon writes to Redis: `"1500"`, `"1.5"`, `"true"`, the string.
+- Values are immutable (`frozen=True` dataclass); mutations replace the value.
 
-## 7. Command surface (Redis-like)
+## 7. Redis layout and the command stream
 
-Case-insensitive command names, whitespace-separated args. Typed values are given explicitly with
-`TYPE`; if omitted, the server defaults to `str`. The full grammar and examples are in
-`PROTOCOL.md`.
+### Keys and channels
 
-### Connection / auth
-| Command | Notes |
-|---|---|
-| `AUTH <token>` | Identify client; selects namespace. |
-| `PING [msg]` / `ECHO msg` | Health check / echo. |
-| `QUIT` | Close connection. |
+| Redis key / channel | Written when | Value |
+|---|---|---|
+| `<prefix><key>` | a polled tag changes, or a write is read back | the value as `Value.text()` |
+| `<prefix><key>.q` | quality changes (`good` ↔ `stale`) | `good` / `stale` |
+| `<prefix><key>.ts` | every write, only with `--timestamps` | unix seconds, 3 decimals |
 
-### Key–value
-| Command | Notes |
-|---|---|
-| `SET key value [TYPE t] [EX s\|PX ms] [NX\|XX]` | Upsert. |
-| `GET key` / `MGET key…` | Returns `[type, value]`. |
-| `DEL key…` / `EXISTS key…` | Delete / test. |
-| `TYPE key` | Returns type tag or `none`. |
-| `EXPIRE key seconds` / `TTL key` | TTL management. |
-| `KEYS pattern` / `SCAN cursor [MATCH p] [COUNT n]` | Enumeration. |
-| `INCR key [BY n]` / `DECR key [BY n]` | Integer types only; preserves type; range-checked. |
-| `DBSIZE` | Live key count. |
+`<prefix>` defaults to `plc:`. Each write is a pipeline of `SET` (value, and `.ts` if enabled) plus
+`PUBLISH` on the same channel, so consumers can read current state or subscribe to changes. A
+`PUBLISH` happens only when the value actually changed (the poller keeps the last value locally);
+quality is published only on a change.
 
-### Pub/Sub
-| Command | Notes |
-|---|---|
-| `PUBLISH channel value [TYPE t] [RETAIN]` | Publish; `RETAIN` persists last value. |
-| `SUBSCRIBE channel…` / `PSUBSCRIBE pattern…` | Subscribe (literal / glob). |
-| `UNSUBSCRIBE [channel…]` / `PUNSUBSCRIBE [pattern…]` | Unsubscribe. |
-| `PUBSUB CHANNELS\|NUMSUB\|NUMPAT [arg]` | Introspection. |
+### Write path (Stream)
 
-### Admin
-| Command | Notes |
-|---|---|
-| `INFO [section]`, `FLUSHALL`, `COMMAND [COUNT]`, `TENANT …` | Operational. |
+Redis has no server-side hook to observe a client writing a key, so writes are explicit commands on
+a Stream. The daemon consumes them as a consumer group and acknowledges only after the PLC write.
 
-Notes:
-- The command registry is data-driven: write an `async def` handler and call
-  `register(name, handler, min_args=…, max_args=…, scope=…)` in `creek.commands`.
-  Add commands there, never with ad-hoc string matching in the transport layer.
-- New commands must be reflected in this table and in `PROTOCOL.md`.
+```bash
+# a SCADA client asks the daemon to write motor.speed = 20 (engineering units)
+redis-cli XADD plc:commands '*' key motor.speed value 20
+```
 
-## 8. Auth model
+- Fields: `key` (the tag key) and `value` (engineering units; scaled tags are converted back to raw
+  counts). Extra fields are ignored.
+- Group/consumer: `--consumer-group` (default `creek-plc`) and a per-process consumer name
+  (`hostname-pid`), so several daemons can share a group.
+- **Every** entry is `XACK`ed, including malformed or rejected ones, so one bad entry cannot block
+  the queue. Rejections are logged on the `creek.audit` logger (unknown tag, read-only tag, driver
+  error) and counted on the consumer.
+- Trade-off: rejected commands are dropped, not dead-lettered (see §14).
 
-Auth exists to **recognize the client and select its namespace**, not to be a full security
-boundary in v1.
+### Read-back after a write
 
-- `AUTH <token>` resolves a token to `Identity(id, namespace, acl)`.
-- Token store: a JSON file (`--auth-file`, see `creek.auth`), loaded with `Authenticator.from_file`.
-  Tokens are compared with `hmac.compare_digest` (constant time). A token may be stored plaintext
-  (development) or hashed with scrypt; a hashed token is a string starting with `scrypt$`
-  (`hash_token()` / `scripts/hash_token.py` generate them). Each `authenticate` tries every stored
-  verifier, so the work is constant-time across clients.
-- When `--auth-file` is omitted, anonymous access is allowed with a full ACL.
-- ACLs are coarse: `read`, `write`, `subscribe`, `admin` (or `all`/`*`).
-- Every command handler receives the resolved identity; the store owner is derived from it. Never
-  trust a client-supplied namespace.
-- `AUTH` also moves the connection's pub/sub subscriber to the new namespace and drops any
-  subscriptions registered under the previous one (a namespace switch must not leave stale
-  subscriptions behind).
-- Tenants carry optional quotas (M6b): keys, approximate memory, connections, subscriptions, and
-  command rate. Exceeding one returns a `QUOTA` error. Memory is approximated as
-  `len(key) + len(value blob)` per entry plus retained values.
-- Keys and channels are capped at 1024 bytes (`MAX_KEY_BYTES` / `MAX_CHANNEL_BYTES`), and
-  admin-scoped commands are written to the `creek.audit` logger with the acting identity (M6c).
+`PlcManager.write` writes the PLC, then reads the tag back and mirrors the result, so Redis reflects
+the PLC's actual value (not the requested one) as soon as the write completes.
 
-Auth file schema:
+## 8. Auth and safety
+
+- The daemon has **no auth of its own**. Use Redis ACLs to restrict who can `XADD` to the command
+  stream, and run the daemon on the OT network. Do not expose the command stream to untrusted
+  clients: it is a direct write path to physical equipment.
+- Writes are **opt-in per tag** (`"writable": true`); everything is read-only by default.
+- Writes are logged to the `creek.audit` logger with `key`, `value`, `entry`, and `stream` fields.
+- Consider a global write-enable flag and per-connection rate limits (see §14) so a runaway client
+  cannot hammer a PLC.
+- `creek-plc` is **not safety-certified**. Interlocks, watchdogs, and fail-safes stay in the PLC;
+  the daemon must never be in a control loop.
+- There is no bus/PLC TLS in v1. Modbus/TCP and S7 are plaintext by design.
+
+## 9. Configuration
+
+A single JSON file (`--config`):
 
 ```json
 {
-  "allow_anonymous": false,
-  "clients": [
-    {"id": "sensor-a", "namespace": "sensors", "token": "t1", "acl": ["read", "subscribe"]},
-    {"id": "admin", "token": "scrypt$16384$8$1$<salt>$<hash>", "acl": ["all"]}
+  "connections": [
+    {"name": "line1", "driver": "modbus", "host": "10.0.0.10", "port": 502,
+     "poll_interval": 0.5, "params": {"unit": 1}},
+    {"name": "line2", "driver": "s7", "host": "10.0.0.11", "port": 102,
+     "params": {"rack": 0, "slot": 1}}
+  ],
+  "tags": [
+    {"key": "motor.speed", "connection": "line1", "address": "HR0", "type": "u16", "scale": 0.1},
+    {"key": "motor.run",   "connection": "line1", "address": "C0",  "type": "bool", "writable": true},
+    {"key": "temp",        "connection": "line2", "address": "DB1.DBD0", "type": "f32"}
   ]
 }
 ```
 
-### Path to multitenancy
-
-Today a "namespace" is a scoping prefix on keys and channels, not a hard isolation boundary: one
-process, one store, one WAL, coarse ACLs. The data model is tenant-ready — every entry carries its
-owner and every WAL record is tagged — and **M6a** (§17) now makes tenants explicit
-(`TENANT …`, auto-provisioned on `AUTH`, journaled and snapshotted), while **M6b** adds per-tenant
-quotas. Per-tenant observability/persistence are **M6c**.
-
-## 9. Transports and framing
-
-- **WebSocket (native):** framing only. Each binary frame carries exactly one RESP2
-  command; the reply is one binary frame. Streamed pub/sub messages are the same 4-element
-  RESP arrays as TCP. Served by the `websockets` library; HTTP requests to `/` are answered
-  from `--web-dir` via the library's `process_request` hook.
-- **TCP:** the same RESP2 subset (arrays of bulk strings or inline commands) as a byte
-  stream; redis-cli compatible for scalar commands. Served by `asyncio.start_server`.
-- **TLS:** intentionally **out of scope**. Run a reverse proxy in front of the TCP listener.
-- All transports funnel into the same `creek.protocol.Command` model; the transport only
-  handles framing, never command semantics.
-- Backpressure: pub/sub delivery is non-blocking; a subscriber whose bounded queue is full or whose
-  `send` fails is dropped rather than blocking the bus.
-- WebSocket read limit: 1 MiB; static files are served from `--web-dir` at `/`.
+- `key` is the Redis key suffix (prefixed with `--key-prefix`).
+- `address` is protocol-specific (see `PLC.md` §4/§5).
+- `type` is a value tag (`bool`, `u16`, `i16`, `i32`, `u32`, `f32`, …).
+- `scale`/`offset` map raw counts to engineering units (`value * scale + offset`, result `f64`).
+- `writable` must be true for a tag to accept writes.
+- `params` is driver-specific (`unit`/`word_order` for Modbus; `rack`/`slot` for S7).
+- `params.quality = "false"` disables the `<key>.q` companion for that connection.
+- A legacy `namespace` field is ignored (it belonged to the removed store).
 
 ## 10. Persistence
 
-- **WAL (write-ahead log):** every mutation (SET/DEL/EXPIRE/FLUSH and `PUBLISH … RETAIN`) is
-  appended as a `u32 length || u32 CRC32 || payload` record (`creek/persist/wal.py`). The payload
-  is UTF-8 JSON describing the mutation, with typed values carried as base64 of the canonical
-  binary blob. `--fsync=always|everysec|no` (default `everysec`).
-- **Snapshot:** periodic full dump (versioned JSON header + entries, values base64) written
-  atomically via temp file → `fsync` → rename, then directory `fsync`. Triggered by
-  `--snapshot-interval` and once on shutdown.
-- **Recovery:** `Engine.recover` loads the snapshot then replays the WAL. Expired entries
-  (absolute deadline in the past) are dropped, not resurrected.
-- Replay of the full WAL after a snapshot is idempotent; the WAL is **not yet compacted/rotated**
-  after a snapshot (see §14).
-- Blocking disk work (write + `os.fsync`) runs off the event loop; see §11.
-- Non-retained pub/sub messages are not persisted.
-- On-disk formats are versioned (`persist.SNAPSHOT_VERSION`, value type byte). Bump the version and
-  provide a migration/reader for old files.
+There is none in the daemon. PLC state is **derived** and re-polled on restart, so mirroring it to
+disk would be pointless. Redis owns durability of the mirrored values; the daemon is stateless and
+can be restarted or run in parallel (though concurrent pollers for the same tag will race — run one
+daemon per PLC, or per tag set).
 
 ## 11. Concurrency
 
-- **One asyncio event loop owns all state.** The store is a plain `dict` and the pub/sub registry a
-  plain collection — no locks, because the loop serializes access.
-- **Rule: never `await` inside a logical critical section.** A command handler mutates state and
-  computes its reply synchronously, then awaits I/O. Violating this lets another task observe a
-  half-applied mutation.
-- Blocking work is offloaded: the WAL/snapshot writer is a dedicated task consuming an
-  `asyncio.Queue`; `os.fsync` and snapshot serialization run via `asyncio.to_thread`.
-- Pub/Sub fanout is a linear scan over a snapshot of subscribers. Delivery uses
-  `Queue.put_nowait`; on `QueueFull` (or a closed writer) the subscriber is pruned, never blocked on.
-- Per-connection outbound writes are serialized (a per-connection `asyncio.Lock`, or a single
-  writer task) because interleaving writes corrupt framing.
-- No threads except short-lived `to_thread` workers for blocking I/O; they must not touch store
-  state directly.
-- Run everything under `pytest-asyncio`; a flaky/racy test is a release blocker.
+- **One asyncio event loop owns all state.** No locks around daemon state.
+- **Rule: never `await` inside a logical critical section.** Mutate/decide synchronously, then
+  await I/O.
+- One `Poller` task per connection and one `CommandConsumer` task. Each writes only its own tags, so
+  there is no shared mutable state between them beyond the `Mirror` (stateless) and the manager's
+  tag table (built once at startup).
+- Blocking work is offloaded: `python-snap7` calls run via `asyncio.to_thread`, serialized by a
+  per-connection lock in `S7Driver`. `redis.asyncio` is native async.
+- A failed poll or a Redis error **never kills the loop**: both the poller and the consumer catch,
+  log, and back off (doubling, capped). A flaky/racy test is a release blocker.
+- Run everything under `pytest-asyncio`.
 
 ## 12. Dependencies
 
@@ -357,284 +282,123 @@ Prefer the standard library. Current external dependencies:
 
 | Concern | Package | Status |
 |---|---|---|
-| WebSocket transport | `websockets` | required |
+| Redis client | `redis` (`redis.asyncio`) | required |
+| Siemens S7 transport | `python-snap7` | required (needs the native `libsnap7`) |
 | Testing | `pytest`, `pytest-asyncio` | dev |
 | Lint/format | `ruff` | dev |
 | Type checking | `mypy` | dev |
 | Modbus cross-check | `pymodbus` | dev (tests only) |
-| Siemens S7 transport | `python-snap7` | required (needs the native `libsnap7`) |
 
-`f16`/`f8` are implemented in-tree (`struct` + custom E4M3), as are the Modbus/TCP client and its
-simulator. `pymodbus` is a **dev-only** dependency used to cross-check our client against an
-independent implementation; the shipped code has no Modbus dependency. S7 uses `python-snap7`, which
-requires the native snap7 library to be installed on the host. Do not add an ORM, a web framework, or
-a logging framework; stdlib `logging` is the logging standard.
-`aiohttp`/`uvicorn`/FastAPI are out of scope: Creek speaks its own protocol, not HTTP APIs.
+Modbus/TCP is implemented **in-tree** (MBAP framing + function codes) with an in-tree simulator;
+`pymodbus` is a dev-only dependency used to cross-check our framing against an independent
+implementation. `f16`/`f8` are implemented in-tree. Do not add an ORM, a web framework, or a
+logging framework; stdlib `logging` is the logging standard.
 
 Dev dependencies are listed twice — `[project.optional-dependencies].dev` for pip and
 `[dependency-groups].dev` for uv — because pip cannot read PEP 735 groups. `uv.lock` is committed.
 `tests/test_packaging.py` asserts the two lists are identical, so update both when adding a tool.
 
-## 13. Testing and quality (planned)
+## 13. Testing and quality
 
-- Table-driven (parametrized) unit tests for `value`, `pattern`, `protocol`, `store`, and `pubsub`.
-- Codec golden/round-trip tests in `tests/test_protocol.py` and `tests/test_value.py`.
-- Fuzz-style tests in `tests/test_fuzz.py`: seeded random input to `parse`, `Value.from_bytes`,
-  `decode_records`, and the client reply parser, asserting only expected exceptions escape.
-- Command-level tests in `tests/test_commands.py` (ACLs, typed values, TTL, pub/sub, recovery).
-- Integration tests in `tests/test_server.py` start WS + TCP listeners on ephemeral ports.
-- Persistence tests: WAL round-trip, truncated-tail tolerance, reset, snapshot round-trip.
-- **Developer benchmark:** `scripts/bench.py` starts a server in a child process and drives it with
-  concurrent clients (`--transport ws|tcp`, `--command ping|set|get|publish`), printing throughput
-  and p50/p95/p99/max latency. It is a regression baseline, not a promise.
-- **Browser load and performance tests** live in `web/` and are served by the WS listener:
-  - `web/index.html` — landing page.
-  - `web/loadtest.html` — many concurrent WS clients, live ops/s chart, latency percentiles.
-  - `web/perf.html` — per-command latency/throughput (SET/GET/PUBLISH), bar chart.
-  - `web/bench.js` — dependency-free helpers (client, percentiles, canvas charts).
-  These pages must stay dependency-free (no CDNs) so they work offline.
+- Table-driven (parametrized) unit tests for `value`, `tags`, `mirror`, and `poller`.
+- Codec golden/round-trip tests in `tests/test_value.py`.
+- Driver tests in `tests/test_modbus.py` and `tests/test_s7.py`, with an in-tree
+  `ModbusSimulator` and one `pymodbus`-backed cross-check (`tests/test_modbus_pymodbus.py`).
+- `tests/test_commands.py` covers stream parsing, write application, acknowledgement, rejection,
+  and Redis-error recovery.
+- `tests/test_daemon.py` is an end-to-end test: a real `ModbusSimulator` plus a fake Redis
+  (`tests/support.py`) proves poll → Redis and Stream → PLC write without external services.
+- **No test requires a live Redis or real hardware.** `tests/support.py` holds `FakeRedis`
+  (strings, pub/sub, streams, consumer groups) and the daemon is injectable.
 - Required checks before merge: `ruff format --check .` clean, `ruff check .`, `mypy src`, and
   `pytest -q` all green.
 
 ## 14. Open questions (DECISION PENDING)
 
-1. **WebSocket library** — `websockets` chosen (asyncio-native, HTTP hooks for static files).
-   Revisit if a stdlib-only server becomes a hard requirement.
-2. **Nibble packing** for `i4`/`u4` — the design byte-masks them; pack two per byte?
-3. **`f8` variants** — E4M3 is the only planned variant; add E5M2?
-4. **WAL compaction/rotation** — *resolved*: after a snapshot the WAL is truncated when no write
-   raced the snapshot (`Wal.compact`); otherwise it is left intact. Under sustained writes the log
-   grows until a quiet snapshot.
-5. **Token hashing** — *resolved*: stdlib `hashlib.scrypt`, plaintext still accepted for dev.
-   Revisit Argon2id only if scrypt proves insufficient.
-6. **Anonymous default** — allowed when no `--auth-file` is given.
-7. **Python client library** — *resolved*: `creek.client` (async, both transports). A separate
-   `creek-client` distribution is still optional.
-8. **Clustering** — v1 is single-node by default; **M7a/M7b** are implemented (§17). Open items:
-   `ASK` redirects during resharding, gossip-based membership, and a stateless proxy. A full
-   design sketch (config epochs, cluster bus, elections, resharding, cluster pub/sub) is in
-   `CLUSTERING.md`.
-9. **Streaming parser re-parse** — the TCP reader re-parses its buffer from the start after each
-   read (simplest correct approach). Add a cursor if very large commands become a real workload.
-10. **SCAN cursor** — an index into the sorted key list, not a reverse-binary cursor like Redis;
-    iteration is not stable across concurrent writes. Fine for v1; revisit if it matters.
-11. **Pattern deliveries** — a delivered frame is always `[message, channel, vtype, value]`
-    (`PROTOCOL.md` §4.4); a pattern subscriber is not told *which* pattern matched. Add a
-    `pmessage` form if that's needed.
-12. **Pub/sub channel scoping** — channels are scoped by namespace (owner), like keys. Decide
-    whether cross-namespace channels are ever wanted.
-13. **Multitenancy isolation** — namespaces share one process, store, and WAL. **M6** (§17) defines
-    quotas, lifecycle, and optional per-tenant persistence. Decide whether a tenant can be exported
-    or moved between nodes (this interacts with M7b sharding).
-14. **Cluster-wide pub/sub** — pub/sub is node-local; a message published on one node does not
-    reach subscribers on another. Routing it across nodes is the hardest part of clustering and is
-    not implemented. See §17 M7c.
-15. **Failover safety** — automatic promotion (`--auto-failover-after`) is best-effort and can
-    split-brain. A consensus-based election (Raft) is not implemented.
+1. **Pending reclaim** — a consumer that dies with unacknowledged entries leaves them in the
+   pending list. Add `XAUTOCLAIM`/`XPENDING` handling so another daemon picks them up?
+2. **Rejected commands** — currently dropped (acked + logged). Add a dead-letter stream?
+3. **Write safety** — a global `--read-only`/write-enable flag and per-connection rate limits.
+4. **Redis Cluster** — key names use `plc:` (no hash tag), so the stream and its entries live on
+   one node. Support `{tag}` hash tags / Sentinel? (The daemon does not use cluster redirects.)
+5. **Deadband** — publish only when a value changes by more than a per-tag deadband, to cut chatter.
+6. **Timestamps/metadata** — `.ts` exists; add a source/quality JSON form or Redis Streams of
+   history instead of overwriting keys?
+7. **Config reload** — watch the config file and add/remove connections without a restart.
+8. **Nibble packing** for `i4`/`u4` — the value codec byte-masks them; pack two per byte?
+9. **`f8` variants** — E4M3 is the only variant; add E5M2?
 
 ## 15. Coding conventions
 
 - **Python 3.12+**. Format and lint with `ruff` (line length 100, double quotes). Type-annotate all
-  public functions; `mypy` must pass on `src`.
+  public functions; `mypy --strict` must pass on `src`.
 - Use `from __future__ import annotations` for forward references in typing.
-- Errors: a small exception hierarchy in `creek/errors.py` (`CreekError` → `CommandError`,
-  `ProtocolError`). Never use bare `except`; never `sys.exit` in library code.
-- Public modules, classes, and functions have docstrings. Command handlers are small and pure where
+- Errors: a small exception hierarchy in `creek/errors.py` (`CreekError` → `InvalidValue`); driver
+  and command errors subclass `CreekError`. Never use bare `except`; never `sys.exit` in library
+  code (only `creek.cli` decides exit codes).
+- Public modules, classes, and functions have docstrings. Handlers are small and pure where
   possible.
 - `asyncio` throughout: all I/O is `async`; never call blocking APIs on the loop (offload with
-  `asyncio.to_thread`). Never `await` in a state-mutating critical section (§11).
+  `asyncio.to_thread`). Never `await` in a state-mutating critical section.
 - Logging via stdlib `logging` with structured fields (`logger.info("msg", extra={...})`); no
-  `print` outside `creek/cli.py`.
-- Keep modules cohesive and dependency-acyclic: `creek.commands` may import `creek.store`,
-  `creek.pubsub`, `creek.persist`, `creek.protocol`, and `creek.value`, but those must not import
-  `creek.commands` or `creek.server`. Prefer flat modules over packages; split only when a file
-  outgrows a few hundred lines.
-- No global mutable state outside the command registry built at import time.
-- Data carriers are `@dataclass(frozen=True, slots=True)` (e.g. `Value`, `Command`, `Identity`).
+  `print` outside `creek/cli.py`. Write audits go to the `creek.audit` logger.
+- Keep modules cohesive and dependency-acyclic: `creek.mirror` must not import `creek.plc` at
+  runtime (it uses `TYPE_CHECKING` for `Tag`) — this avoids an import cycle with `creek.plc`.
+- No global mutable state.
+- Data carriers are `@dataclass(frozen=True, slots=True)` (e.g. `Value`, `Tag`, `Connection`,
+  `RedisConfig`, `WriteCommand`).
 
 ## 16. Glossary
 
 | Term | Meaning |
 |---|---|
-| **Creek** | This project: typed, in-memory KV + pub/sub. |
-| **Client identity** | The authenticated principal that owns a namespace. |
-| **Owner** | Namespace recorded on an entry so a shared store can scope keys per client. |
-| **Retained message** | A published value stored as the channel's last value and persisted. |
-| **WAL** | Write-ahead log used for crash recovery. |
-| **Critical section** | A synchronous block that mutates shared state; must not contain `await`. |
+| **creek-plc** | This project: the PLC ↔ Redis sync daemon. |
+| **Mirror** | The sink for polled values (`RedisMirror`, `MemoryMirror`). |
+| **Tag** | One PLC point mapped to a Redis key (address, type, scale, writable). |
+| **Connection** | One PLC link: driver, host/port, poll interval, driver params. |
+| **Poller** | Per-connection task: read → scale → mirror, with quality and backoff. |
+| **Command stream** | Redis Stream of write requests consumed by the daemon. |
+| **Quality** | `good`/`stale` companion key for a tag's trustworthiness. |
 
 ## 17. Roadmap
 
-- **M0 — Skeleton:** package, `pyproject.toml`, flags, asyncio TCP + WS listeners, command
-  registry. *(implemented)*
-- **M1a — Value model:** all primitive types, text parsing, binary codec, tests. *(implemented)*
-- **M1b — Store:** TTL, simple dict store, and the KV commands (`SET`/`GET`/`DEL`/`TTL`/…).
-  *(implemented)*
-- **M2 — Pub/Sub:** subscribe/publish, pattern matching, linear fanout, retained.
-  *(implemented)*
-- **M3 — Persistence:** WAL + snapshot + recovery tests. *(implemented; WAL compaction added in M4)*
-- **M4 — Auth:** token file, per-client namespaces, coarse ACLs, scrypt token hashing.
-  *(implemented)*
-- **M5 — Hardening:** browser load/perf pages; fuzz tests; async client library. *(implemented)*
-- **M6 — Multitenancy:** promote namespaces to first-class tenants with lifecycle and limits.
-  - **M6a — Registry + admin API:** `TENANT CREATE|LIST|DROP|INFO` (admin scope), auto-provisioned
-    when a client authenticates, journaled and snapshotted. *(implemented)*
-  - **M6b — Quotas:** keys, approximate memory, connections, subscriptions, and command rate per
-    tenant; quota failures return a `QUOTA` error. *(implemented)*
-  - **M6c — Observability + hardening:** per-tenant counters (`INFO tenant`), key/channel length
-    limits, no cross-tenant enumeration, audit logging of admin actions. *(implemented)*
-- **M7 — Clustering (multi-phase; exploratory):** v1 is single-node and nothing in it assumes a
-  cluster.
-  - **M7a — Read replicas:** pull-based replication; the primary keeps a bounded backlog and
-    serves `SYNC` (snapshot) / `REPLICATE <offset>` (incremental); `REPLICAOF`, `ROLE`,
-    `INFO replication`; replicas reject writes. *(implemented)*
-  - **M7b — Sharding:** Redis-compatible hash slots (16384, `{tag}` tags), a static topology
-    (`--cluster-config`), `KEYSLOT`, `CLUSTER INFO|SLOTS`, and `MOVED`/`CROSSSLOT` redirects;
-    the TCP client follows `MOVED`. No gossip/resharding. *(implemented)*
-  - **M7c — Failover:** failure detection (`master_link_down_since`) and opt-in automatic
-    promotion (`--auto-failover-after`). *(implemented, best-effort)* **Not** consensus-safe: a
-    returning primary can cause split-brain, and there is no leader election. Cluster-wide pub/sub
-    routing is **not implemented** (see §14.14).
-- **M8 — Full clustering (design sketch):** close the M7 gap — config epochs, a gossip cluster
-  bus, quorum failure detection, replica elections, resharding, and cluster-wide pub/sub. See
-  `CLUSTERING.md` for the design and the proposed M8a–M8f phases. Requires a durable-ack barrier
-  (`WAIT`/group commit) before automatic failover can be trusted.
-- **M9 — PLC connectivity:** centralize PLC state for SCADA (see `PLC.md`).
-  - **M9a — Tag map + poller:** `Connection`/`Tag`/`PlcConfig`, the `PlcDriver` interface, and a
-    `Poller` that mirrors tags into the store (non-journaled) and publishes changes. *(implemented)*
-  - **M9b — Modbus/TCP driver:** coils/discrete/input/holding registers, read + write, batching,
-    an in-tree simulator, and a `pymodbus` cross-check. *(implemented)*
-  - **M9c — S7 driver:** DB/I/Q/M read/write via `python-snap7` (requires the native snap7
-    library). *(implemented)*
-  - **M9d — Manager + commands:** `--plc-config` wiring, `PLC LIST|TAGS|INFO|WRITE`, write audit.
-    *(implemented)*
-  - **M9e — Quality/staleness, reconnect/backoff, per-connection status.** *(implemented)*
+- **M0 — Daemon skeleton:** config, `RedisMirror`, `Poller`, CLI, lifecycle. *(implemented)*
+- **M1 — Write path:** Redis Stream command consumer, read-back, audit. *(implemented)*
+- **M2 — Drivers:** Modbus/TCP (in-tree + simulator + pymodbus cross-check) and S7 via
+  `python-snap7`. *(implemented)*
+- **M3 — Quality/staleness:** `<key>.q`, backoff, per-connection status. *(implemented)*
+- **M4 — Packaging/tests:** fake Redis, end-to-end daemon tests, `--dry-run`. *(implemented)*
+- **Next (candidate):** pending reclaim (§14.1), dead-letter stream (§14.2), write safety limits
+  (§14.3), deadband (§14.5), config reload (§14.7), Redis Cluster/Sentinel (§14.4).
 
 ## 18. Decision log
 
 Notable decisions future work must respect (newest last).
 
-- **2026-10-06 — Async Python.** Creek pivoted from Go to asyncio Python. See §1–§15.
-- **2026-10-06 — One RESP2 wire protocol.** WebSocket carries the same RESP2 bytes as TCP;
-  WebSocket is framing only (one command per binary frame). There is no JSON codec. See §9 and
-  `PROTOCOL.md` §3.
-- **2026-10-06 — Flat module layout.** An earlier package-per-layer layout (`protocol/`,
-  `command/`, `server/`) was collapsed into single modules (`protocol.py`, `commands.py`,
-  `server.py`): the indirection cost more than it explained. The RESP parser is a pure function
-  over bytes, shared by both transports. See §5 and §15; the TCP re-parse trade-off is §14.9.
-- **2026-10-06 — uv and pip both supported.** uv is the agent-default (locks the interpreter,
-  `uv.lock`), but the project is pip-installable: `pip install -e ".[dev]"`. Dev deps are declared
-  in both the PEP 621 extra and the PEP 735 group, guarded by `tests/test_packaging.py`. See §3.
-- **2026-10-06 — Value type bytes.** Type tags are bytes `0x01`–`0x0E` (`i4`=1 … `bool`=14),
-  fixed by `creek.value.ValueType` and documented in `PROTOCOL.md` §5.1. Changing a value is a
-  format break. `f8` is E4M3 and saturates; `f16`/`f32` overflow to ±inf. Text parsing is
-  range-checked (`InvalidValue`), and `to_bytes`/`from_bytes` are the storage codec.
-- **2026-10-06 — Store ownership and TTL.** Keys are scoped by `(owner, key)` where `owner` is
-  the identity's namespace, never client-supplied. The store is a shared service injected into
-  each connection's `Context` by the server (no module-global state). TTLs are absolute wall-clock
-  deadlines (`time.time`) so M3 can persist them; expiry is lazy on access. `INCR`/`DECR` create a
-  missing key as `i32`, preserve the existing integer type and TTL, and range-check the result.
-  `SCAN` uses an integer index into the sorted key list (a simplification; see §14.10).
-- **2026-10-06 — Client library.** `creek.client` is async, supports both transports, decodes
-  replies to native Python, and raises `CommandError` on server errors. `subscribe()` is an async
-  generator; a subscribed client must not run other commands concurrently. It lives in the package
-  (not a separate distribution).
-- **2026-10-06 — Browser pages.** `web/` is dependency-free ES modules (`bench.js`) served by the
-  WS listener: `index.html`, `loadtest.html`, `perf.html`. No CDNs, so they work offline.
-- **2026-10-06 — Fuzzing.** `tests/test_fuzz.py` uses seeded `random` (no property-testing
-  dependency) to check the parsers only raise expected exceptions and that the value codec is
-  canonical.
-- **2026-10-06 — Auth token hashing.** Tokens may be plaintext or `scrypt$n$r$p$salt$hash`
-  (stdlib `hashlib.scrypt`, n=2^14, r=8, p=1). `authenticate` tries every verifier so the timing
-  does not reveal which client matched. `hash_token()` and `scripts/hash_token.py` generate hashes.
-- **2026-10-06 — WAL compaction.** `Server._snapshot` captures the mutation counter, writes the
-  snapshot, then calls `Wal.compact`: if the counter is unchanged it enqueues a truncate marker the
-  writer task applies (dropping records already in the snapshot); otherwise the log is left intact.
-- **2026-10-06 — Benchmark harness.** `scripts/bench.py` runs the server in a **child process**
-  (the load generator and server must not share an event loop) and reports throughput + latency
-  percentiles. It is deliberately thin and lives outside `src/` (not part of the package). Browser
-  charts stay in M5. See §13.
-- **2026-10-06 — Roadmap extended: multitenancy and clustering.** v1 stays single-node with
-  namespace scoping. §1 (non-goals), §8 (auth), and §14 were updated so they no longer contradict
-  the roadmap; **M6** (multitenancy) and **M7** (clustering, multi-phase) are now planned.
-  Multitenancy builds on the existing owner tagging; clustering is exploratory and must not shape
-  v1 code.
-- **2026-10-06 — Persistence.** WAL records are ``u32 length || u32 CRC32 || UTF-8 JSON`` with
-  values as base64 of `Value.to_bytes()`; a truncated/corrupt tail is tolerated. Snapshots are a
-  versioned JSON document written atomically (temp → fsync → rename → dir fsync). The `Wal` runs a
-  background writer task (draining an `asyncio.Queue`, `os.fsync` in a thread); `--fsync=always`
-  fsyncs after every record *in the background*, so a command never blocks on disk. The store and
-  bus journal mutations via the `Journal` protocol; recovery uses non-journaling `restore` paths.
-  A snapshot is written on shutdown and every `--snapshot-interval`. See §10 and §14.4.
-- **2026-10-06 — PLC manager, commands, and quality (M9d/M9e).** `PlcManager` owns a driver and a
-  poller per connection and is wired into `Server` via `--plc-config`. The `PLC` command
-  (`LIST`/`TAGS`/`INFO`/`WRITE`, `write` scope) introspects connections and writes tags; writes
-  scale engineering units back to raw counts, read the tag back into the mirror, and are audited on
-  `creek.audit`. Pollers expose `link`/`polls`/`errors`/`last_success`, back off on failure, and
-  publish a companion `<key>.q` quality key (`good`/`stale`, opt-out via `params.quality`). PLC tags
-  live in the connection's namespace, so SCADA clients authenticate into it.
-- **2026-10-06 — S7 driver (M9c).** Built on **`python-snap7`** (native `libsnap7` required) rather
-  than an in-tree S7comm implementation: it is battle-tested against real S7-300/400/1200/1500, and
-  S7comm is fiddly to get right. `python-snap7` is synchronous, so calls are offloaded with
-  `asyncio.to_thread` and serialized per connection; reads are grouped by `(area, db)` into one span
-  request. Addresses: `DB<n>.DB[XBWD]<offset>[.<bit>]` and `[IQM][XBWD]<offset>[.<bit>]`.
-  S7-1200/1500 needs PUT/GET enabled and non-optimized DBs; symbolic/S7comm-plus is out of scope.
-- **2026-10-06 — Modbus/TCP driver (M9b).** Implemented **in-tree** (no dependency): MBAP
-  framing, function codes 01/02/03/04/05/06/0F/10, coils/discrete inputs and input/holding
-  registers, contiguous-run batching, and configurable word order for 32-bit values. Addresses are
-  `C<n>`/`DI<n>`/`IR<n>`/`HR<n>` (0-based). Tests use an in-tree `ModbusSimulator` plus one
-  `pymodbus`-backed cross-check (dev-only dependency) so our framing is validated against an
-  independent implementation. S7comm is M9c.
-- **2026-10-06 — PLC connectivity is the project's purpose (M9).** Creek centralizes PLC/SCADA
-  state: a `Poller` per connection reads tags via a `PlcDriver` and mirrors them into the store as
-  typed values, publishing changes on channels named after the tag keys. PLC state is **derived**,
-  so it is written with the non-journaling `Store.restore` (it is re-polled on restart). Writes are
-  opt-in per tag (`writable`) and audited. The tag map, driver interface, and poller are in
-  `creek.plc`; the Modbus/TCP and S7comm wire drivers are M9b/M9c. See `PLC.md`.
-- **2026-10-06 — Read replicas (M7a).** Replication is **pull-based**: the primary keeps a
-  bounded in-memory backlog (`ReplicationLog`, the journal used by store/bus/tenants, optionally
-  forwarding to the WAL) and serves `SYNC` (full snapshot) and `REPLICATE <offset>` (records since
-  an offset). A replica pulls the snapshot, then polls; if its offset was evicted it does a full
-  resync. Replicas reject writes (`READONLY`). Applied records are journal-free so a replica does
-  not re-journal into its own log. Trade-off: replication lag is one poll interval.
-- **2026-10-06 — Sharding (M7b).** Redis-compatible CRC16 slots (16384, `{tag}` hash tags) and a
-  **static** topology loaded from `--cluster-config`. A command whose key belongs to another node
-  gets `MOVED <slot> <addr>`; multi-key commands spanning slots get `CROSSSLOT`; unassigned slots
-  get `CLUSTERDOWN`. The TCP client follows `MOVED`. There is no gossip, resharding, or `ASK`.
-- **2026-10-06 — Failover (M7c).** Failure detection is exposed as `master_link_down_since` in
-  `INFO replication`; `REPLICAOF NO ONE` promotes manually; `--auto-failover-after <seconds>`
-  promotes automatically after a sustained outage. This is **best-effort, not consensus-safe** —
-  no leader election, and a returning primary can cause split-brain. Cluster-wide pub/sub is not
-  implemented. See §14.14/§14.15.
-- **2026-10-06 — Tenant hardening (M6c).** Per-tenant counters (`commands`, `quota_rejections`,
-  `connections_opened`) surface in `TENANT INFO`, and `INFO tenant` prints a one-line report per
-  tenant. Keys and channels are capped at 1024 bytes. Admin-scoped commands are logged to the
-  `creek.audit` logger with `actor` / `namespace` / `command` / `command_args` fields (the actor is
-  also in the message so the default log format shows it). Length limits and audit are centralized
-  in `execute` (`_check_lengths`, `_audit`), so handlers stay unchanged.
-- **2026-10-06 — Tenant quotas (M6b).** Optional per-tenant limits: `max_keys`, `max_memory`,
-  `max_connections`, `max_subscriptions`, and `max_rate` (a token bucket). Memory is an
-  **approximation**: `len(key) + len(value.to_bytes())` per key plus retained channel values, not
-  allocator overhead. Set via `TENANT CREATE … MAXKEYS n …` / `TENANT SET`; violations raise a
-  `QUOTA` error. `Store.usage` / `Bus.usage` compute the estimate on demand (only when a limit is
-  set). Connection slots are acquired at `AUTH` (and for anonymous connections at accept) and
-  released on disconnect.
-- **2026-10-06 — Tenants (M6a).** Tenants are explicit records (`creek.tenant`) with a lifecycle;
-  `TENANT CREATE|LIST|DROP|INFO` is admin-scoped. Tenants are auto-provisioned when a client
-  authenticates (so existing auth files keep working) and are journaled + snapshotted. `TENANT
-  DROP` clears keys, channels, and retained values, then removes the record; a namespace can be
-  re-provisioned by authenticating again (DROP is "forget", not a permanent ban).
-- **2026-10-06 — Namespace isolation is pinned by tests.** `tests/test_tenancy.py` asserts that
-  keys, channels, enumeration, flushing, retained messages, and persisted records are scoped by
-  owner, and that ACLs are per-identity (not per-namespace). `AUTH` moves the subscriber to the new
-  namespace and clears its subscriptions. These tests are the safety net for M6.
-- **2026-10-06 — Pub/sub delivery.** Each connection owns one `Subscriber` with a single bounded
-  outbound queue; one writer task drains it, so replies and messages never interleave. Replies
-  use blocking `send` (backpressure); pub/sub uses `deliver` (drop the subscriber if full). The
-  `Bus` is shared via `Context` like the store. Fanout is a linear scan; a subscriber matching
-  both a channel and a pattern is delivered once. Channels are namespaced by owner (§14.12).
-  `RETAIN` stores the channel's last value and it is replayed *after* the subscribe confirmation
-  (handlers queue it in `Context.pending`, flushed by the transport after the reply).
+- **2026-10-16 — Pivot: sync daemon over an existing Redis.** The earlier project reimplemented a
+  typed KV store, RESP2 server, persistence, auth, tenancy, and clustering. That was dismantled in
+  favour of a daemon that uses Redis as the store, bus, and command queue. Rationale: Redis already
+  does those things well; the project's value is PLC connectivity. `value.py` and the `plc/` drivers
+  were retained.
+- **2026-10-16 — Writes go through a Redis Stream, not keyspace notifications.** Redis has no
+  server-side hook for "a client wrote a key". A Stream gives durable, ackable, at-least-once
+  commands that work on any Redis without server configuration, and it is an explicit control
+  surface (a client can see the queue). Keyspace notifications would require enabling
+  `notify-keyspace-events` and are lossy. See §7.
+- **2026-10-16 — Redis owns durability and auth.** The daemon keeps no WAL/snapshot (PLC state is
+  re-polled) and has no token/ACL layer (Redis ACLs + network placement). This removes persistence
+  and tenancy code entirely. See §8/§10.
+- **2026-10-16 — Every stream entry is acknowledged, even on failure.** A malformed or rejected
+  command is logged on `creek.audit` and acked so it cannot block the queue; the alternative
+  (leaving it pending forever) is worse for an operational daemon. Dead-lettering is §14.2.
+- **2026-10-16 — One flat value per key.** Values are written as `Value.text()` on `<prefix><key>`,
+  with `.q` and optional `.ts` companions, rather than a JSON blob or a Redis hash. This keeps the
+  data trivially consumable by any Redis client; type comes from the config. See §7.
+- **2026-10-16 — `Mirror` is the seam.** Poller and manager depend on a `Mirror` protocol, not on
+  Redis, so `MemoryMirror` powers `--dry-run` and tests without a Redis server. See §4/§13.
+- **2026-10-16 — Modbus stays in-tree; S7 uses `python-snap7`.** The in-tree Modbus/TCP client is
+  small, tested, and dependency-free (cross-checked against `pymodbus` in dev); S7comm is fiddly
+  enough that a battle-tested library is worth the native dependency. See §12 and `PLC.md`.
 
 ---
 

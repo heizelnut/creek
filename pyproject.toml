@@ -3,17 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "creek"
+name = "creek-plc"
 version = "0.0.0"
-description = "Typed, in-memory key-value store with publish/subscribe over TCP and WebSocket."
+description = "Sync PLC state (Modbus/TCP, Siemens S7) with an existing Redis instance."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "heizelnut" }]
-dependencies = ["python-snap7>=3.0", "websockets>=13"]
+dependencies = ["python-snap7>=3.0", "redis>=5"]
 
 [project.scripts]
-creek = "creek.cli:main"
+creek-plc = "creek.cli:main"
 
 # pip:  pip install -e ".[dev]"
 [project.optional-dependencies]
@@ -26,8 +26,7 @@ dev = [
 ]
 
 # uv:  uv sync   (installed by default)
-# Keep this list in sync with [project.optional-dependencies].dev; tests/test_packaging.py
-# fails if they drift.
+# Keep this list in sync with [project.optional-dependencies].dev.
 [dependency-groups]
 dev = [
     "mypy>=1.11",
@@ -55,7 +54,7 @@ files = ["src"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
-module = ["websockets.*"]
+module = ["redis", "redis.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

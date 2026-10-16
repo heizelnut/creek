@@ -60,9 +60,7 @@ def _tag(key: str, address: str, type: str) -> Tag:
 
 
 async def test_driver_reads_and_writes_against_pymodbus(pymodbus_server: int) -> None:
-    connection = Connection(
-        name="plc", driver="modbus", host="127.0.0.1", port=pymodbus_server, namespace="plc"
-    )
+    connection = Connection(name="plc", driver="modbus", host="127.0.0.1", port=pymodbus_server)
     driver = ModbusDriver(connection)
     try:
         await driver.write(_tag("sp", "HR0", "u16"), Value.parse("u16", "1234"))

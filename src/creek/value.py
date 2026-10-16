@@ -1,6 +1,6 @@
 """Typed values: parsing, text form, and the binary codec.
 
-See ``PROTOCOL.md`` §5. A value is a 1-byte type tag followed by a payload
+See ``AGENTS.md`` §6. A value is a 1-byte type tag followed by a payload
 (little-endian for fixed-width numerics). Values are immutable; a mutation
 produces a new :class:`Value`.
 """
@@ -19,7 +19,7 @@ MAX_STR = 512 * 1024
 
 
 class ValueType(IntEnum):
-    """The type tag; the numeric value is the on-disk type byte (§5.1)."""
+    """The type tag; the numeric value is the canonical type byte (``AGENTS.md`` §6)."""
 
     I4 = 0x01
     U4 = 0x02

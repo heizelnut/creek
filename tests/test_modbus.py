@@ -31,7 +31,6 @@ def _connection(port: int, **params: int | str) -> Connection:
         driver="modbus",
         host="127.0.0.1",
         port=port,
-        namespace="plc",
         params={"unit": 1, **params},
     )
 

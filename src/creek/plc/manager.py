@@ -8,13 +8,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from creek.errors import CreekError
+from creek.mirror import Mirror
 from creek.plc.driver import PlcDriver
 from creek.plc.modbus import ModbusDriver
 from creek.plc.poller import Poller, apply_scale
 from creek.plc.s7 import S7Driver
 from creek.plc.tags import Connection, PlcConfig, Tag
-from creek.pubsub import Bus
-from creek.store import Store
 from creek.value import Value
 
 log = logging.getLogger("creek.plc")
@@ -44,15 +43,13 @@ class PlcManager:
     def __init__(
         self,
         config: PlcConfig,
-        store: Store,
-        bus: Bus,
+        mirror: Mirror,
         *,
         drivers: dict[str, DriverFactory] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config = config
-        self._store = store
-        self._bus = bus
+        self._mirror = mirror
         self._drivers = drivers if drivers is not None else _DRIVERS
         self._clock = clock
         self.connections: dict[str, PlcConnection] = {}
@@ -63,7 +60,7 @@ class PlcManager:
         for connection in self.config.connections.values():
             driver = self._make_driver(connection)
             tags = self.config.tags_for(connection.name)
-            poller = Poller(connection, tags, driver, self._store, self._bus, clock=self._clock)
+            poller = Poller(connection, tags, driver, self._mirror, clock=self._clock)
             entry = PlcConnection(connection, driver, poller, {tag.key: tag for tag in tags})
             self.connections[connection.name] = entry
             self._tags.update(entry.tags)
@@ -78,7 +75,7 @@ class PlcManager:
         self._tags.clear()
 
     def tag(self, key: str) -> Tag | None:
-        """Look up a tag by its Creek key."""
+        """Look up a tag by its key."""
         return self._tags.get(key)
 
     def tags(self) -> list[Tag]:
@@ -100,8 +97,8 @@ class PlcManager:
         values = await entry.driver.read([tag])
         if tag.key in values:
             value = apply_scale(tag, values[tag.key])
-            self._store.restore(entry.poller.owner, tag.key, value, None)
-            self._bus.publish(entry.poller.owner, tag.key, value)
+            entry.poller.remember(tag.key, value)
+            await self._mirror.put(tag, value)
 
     def _make_driver(self, connection: Connection) -> PlcDriver:
         factory = self._drivers.get(connection.driver)

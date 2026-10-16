@@ -28,7 +28,6 @@ def _connection(port: int) -> Connection:
         driver="s7",
         host="127.0.0.1",
         port=port,
-        namespace="s7",
         params={"rack": 0, "slot": 1},
     )
 
